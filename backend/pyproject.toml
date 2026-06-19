@@ -1,0 +1,33 @@
+[project]
+name = "analytics-dash-backend"
+version = "0.1.0"
+description = "Self-hosted SQL to chart analytics backend"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "redshift-connector>=2.1",
+  "duckdb>=1.0",
+  "sqlalchemy>=2.0",
+  "psycopg2-binary>=2.9",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# Local data
+*.duckdb
+*.duckdb.wal
+
+# Env
+.env
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Claude Code local agent state (machine-specific)
+.claude/
