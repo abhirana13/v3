@@ -1,0 +1,91 @@
+# Production-only compose. For local dev use docker-compose.yml instead.
+# Run: docker compose -f docker-compose.prod.yml up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [analytics-net]
+
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+    volumes:
+      - duckdb_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [analytics-net]
+
+  worker:
+    build: ./backend
+    command: python -m app.worker
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+    volumes:
+      - duckdb_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [analytics-net]
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    depends_on: [backend]
+    restart: unless-stopped
+    networks: [analytics-net]
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7
+    command: >
+      --provider=google
+      --email-domain=felicitygames.com
+      --upstream=http://nginx
+      --http-address=0.0.0.0:4180
+      --redirect-url=https://${APP_DOMAIN}/oauth2/callback
+      --cookie-secure=true
+      --cookie-domain=.internal.felicitytools.com
+      --cookie-name=_felicity_session
+      --reverse-proxy=true
+      --skip-provider-button=true
+      --cookie-csrf-per-request=true
+      --cookie-csrf-expire=5m
+    environment:
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+    ports:
+      - "4180:4180"
+    depends_on: [nginx]
+    restart: unless-stopped
+    networks: [analytics-net]
+
+volumes:
+  postgres_data:
+  duckdb_data:
+
+networks:
+  analytics-net:
+    driver: bridge
