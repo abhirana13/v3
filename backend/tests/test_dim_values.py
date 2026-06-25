@@ -29,13 +29,16 @@ def _seed(duckdb_path, chart_id, columns_with_types, rows):
     conn.close()
 
 
-def _make_chart(client):
+def _make_chart(client, value_order="natural"):
     cid = client.post("/charts", json={"name": "dv", "query": "SELECT 1", "time_column": "event_date"}).json()["id"]
     r = client.put(
         f"/charts/{cid}/dims-metrics",
         json={
             "time_column": "event_date",
-            "dimensions": [{"name": "country", "column_name": "country"}, {"name": "source", "column_name": "source"}],
+            "dimensions": [
+                {"name": "country", "column_name": "country", "value_order": value_order},
+                {"name": "source", "column_name": "source", "value_order": value_order},
+            ],
             "metrics": [{"name": "dau", "column_name": "dau"}],
         },
     )
@@ -44,7 +47,7 @@ def _make_chart(client):
 
 
 def test_dim_values_ordered_by_metric_descending_and_date_extent(client, duckdb_path):
-    cid = _make_chart(client)
+    cid = _make_chart(client, value_order="metric")
     _seed(
         duckdb_path, cid,
         [("event_date", "DATE"), ("country", "VARCHAR"), ("source", "VARCHAR"), ("dau", "BIGINT")],
@@ -82,3 +85,21 @@ def test_dim_values_empty_table(client, duckdb_path):
     body = client.get(f"/charts/{cid}/dim-values").json()
     assert body["dimensions"] == {"country": [], "source": []}
     assert body["date_min"] is None
+
+
+def test_dim_values_natural_order_sorts_buckets_numerically(client, duckdb_path):
+    """Default 'natural' order is number-aware: D2-D7 < D8-D14 < D15-D30, not the
+    alphabetical D0, D1, D15-D30, D2-D7, D31-D60, D8-D14."""
+    cid = client.post("/charts", json={"name": "dv-nat", "query": "SELECT 1", "time_column": "event_date"}).json()["id"]
+    assert client.put(f"/charts/{cid}/dims-metrics", json={
+        "time_column": "event_date",
+        "dimensions": [{"name": "cohort", "column_name": "cohort"}],  # value_order defaults to "natural"
+        "metrics": [{"name": "dau", "column_name": "dau"}],
+    }).status_code == 200
+    _seed(
+        duckdb_path, cid,
+        [("event_date", "DATE"), ("cohort", "VARCHAR"), ("dau", "BIGINT")],
+        [(date(2026, 6, 1), b, 1) for b in ["D8-D14", "D0", "D15-D30", "D2-D7", "D1", "D31-D60"]],
+    )
+    body = client.get(f"/charts/{cid}/dim-values").json()
+    assert body["dimensions"]["cohort"] == ["D0", "D1", "D2-D7", "D8-D14", "D15-D30", "D31-D60"]

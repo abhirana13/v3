@@ -1,11 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.backpop.duckdb_writer import cache_columns
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.crud import dims_metrics as crud_dm
+from app.derived_dims import derived_for_chart
 from app.introspection import IntrospectionError, introspect_query
-from app.schemas import DimsMetricsIn, DimsMetricsOut, IntrospectionResult
+from app.schemas import DimensionOut, DimsMetricsIn, DimsMetricsOut, IntrospectionResult
 
 router = APIRouter(prefix="/charts", tags=["dims-metrics"])
 
@@ -29,10 +31,18 @@ def get_dims_metrics(chart_id: int, db: Session = Depends(get_db)):
     chart = crud_dm.get(db, chart_id)
     if chart is None:
         raise HTTPException(status_code=404, detail="chart not found")
+    dims = [DimensionOut.model_validate(d) for d in chart.dimensions]
+    # append backend-derived dimensions (e.g. country_tier) so the chart can
+    # filter/split by them; flagged derived=True so the config page hides them.
+    for i, dd in enumerate(derived_for_chart(chart, cache_columns(chart.id))):
+        dims.append(DimensionOut(
+            id=-(i + 1), name=dd.name, column_name=dd.name, kind="regular",
+            value_order="natural", display_order=len(chart.dimensions) + i, derived=True,
+        ))
     return DimsMetricsOut(
         time_column=chart.time_column,
         date_format=chart.date_format,
-        dimensions=chart.dimensions,
+        dimensions=dims,
         metrics=chart.metrics,
     )
 

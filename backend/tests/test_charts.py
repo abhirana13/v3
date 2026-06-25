@@ -171,3 +171,30 @@ def test_delete_chart(client):
 def test_delete_chart_not_found(client):
     r = client.delete("/charts/99999")
     assert r.status_code == 404
+
+
+def test_delete_chart_drops_duckdb_cache_table(client, isolated_duckdb):
+    """Deleting a chart must also drop its DuckDB cache table (no orphan left)."""
+    import duckdb
+    from app.backpop.duckdb_writer import table_name
+
+    cid = client.post("/charts", json=_payload(name="with-cache")).json()["id"]
+    table = table_name(cid)
+
+    con = duckdb.connect(isolated_duckdb)
+    con.execute(f'CREATE TABLE "{table}" (event_date DATE, dau BIGINT)')
+    con.execute(f"INSERT INTO \"{table}\" VALUES (DATE '2026-06-10', 5)")
+    con.close()
+
+    def table_exists():
+        con = duckdb.connect(isolated_duckdb)
+        try:
+            return con.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+            ).fetchone() is not None
+        finally:
+            con.close()  # release the file lock before the app opens its own connection
+
+    assert table_exists()  # cache table present before delete
+    assert client.delete(f"/charts/{cid}").status_code == 204
+    assert not table_exists()  # cache table dropped with the chart

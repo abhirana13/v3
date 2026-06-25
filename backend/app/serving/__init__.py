@@ -27,8 +27,11 @@ aggregations like AVG / COUNT-DISTINCT-across-days will come via formula
 metrics (Phase 7).
 """
 
-from app.backpop.duckdb_writer import table_name
+import re
+
+from app.backpop.duckdb_writer import cache_columns, table_name
 from app.connections import duckdb as duckdb_conn
+from app.derived_dims import effective_dimensions
 from app.formulas import eval_formula, validate_formula
 from app.models import Chart
 from app.schemas import DataRequest
@@ -40,6 +43,14 @@ def _q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _natural_key(value):
+    """Human/number-aware sort key: splits a label into text+number chunks so
+    'D2-D7' < 'D8-D14' < 'D15-D30' (not alphabetical), and non-numeric labels
+    (e.g. platform) sort alphabetically."""
+    parts = re.split(r"(\d+)", str(value))
+    return [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in parts if p != ""]
+
+
 def _table_exists(conn, table: str) -> bool:
     return (
         conn.execute(
@@ -48,6 +59,13 @@ def _table_exists(conn, table: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def _columns(conn, table: str) -> set:
+    """Column names present in the cache table (empty if it doesn't exist)."""
+    if not _table_exists(conn, table):
+        return set()
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({_q(table)})").fetchall()}
 
 
 def _build_where(req: DataRequest, time_col: str, dim_by_name: dict, exclude_dims=frozenset()):
@@ -76,7 +94,7 @@ def _build_where(req: DataRequest, time_col: str, dim_by_name: dict, exclude_dim
 def _run_keyset(conn, chart: Chart, req: DataRequest, requested_dims: list[str]) -> list[tuple]:
     table = table_name(chart.id)
     time_col = chart.time_column
-    dim_by_name = {d.name: d for d in chart.dimensions}
+    dim_by_name = {d.name: d for d in effective_dimensions(chart, _columns(conn, table))}
 
     bucket_expr = (
         f"CAST(date_trunc('{req.granularity}', CAST({_q(time_col)} AS DATE)) AS DATE)"
@@ -105,8 +123,9 @@ def _run_metric(
     """Return {(time_bucket, *eff_values): metric_value} for this metric."""
     table = table_name(chart.id)
     time_col = chart.time_column
-    dim_by_name = {d.name: d for d in chart.dimensions}
-    all_chart_dim_names = [d.name for d in chart.dimensions]
+    _eff = effective_dimensions(chart, _columns(conn, table))
+    dim_by_name = {d.name: d for d in _eff}
+    all_chart_dim_names = [d.name for d in _eff]
 
     indep = set(metric.independent_dimensions or [])
     grain_dim_names = [d for d in all_chart_dim_names if d not in indep]
@@ -165,7 +184,7 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
     conn = duckdb_conn.get_connection()
     try:
         if not _table_exists(conn, table):
-            return {"dimensions": {d.name: [] for d in chart.dimensions}, "date_min": None, "date_max": None}
+            return {"dimensions": {d.name: [] for d in effective_dimensions(chart, set())}, "date_min": None, "date_max": None}
 
         where, params = "1=1", []
         tc = chart.time_column
@@ -179,34 +198,41 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
                 params.append(to_date)
             where = " AND ".join(clauses)
 
-        # Order each dimension's values by how much they "hold" — the descending
-        # sum of the chart's primary base metric — so big contributors sort first.
-        # Falls back to alphabetical when there's no base metric (or the sum fails).
+        # Per-dimension value ordering (see Dimension.value_order):
+        #  - "metric": descending by the primary base metric's total (biggest first)
+        #  - "natural" (default): number-aware label sort (D2-D7 < D8-D14 < D15-D30,
+        #    alphabetical for non-numeric like platform)
         order_metric = next(
             (m for m in sorted(chart.metrics, key=lambda x: (x.display_order or 0)) if m.column_name),
             None,
         )
 
-        def _values(col: str) -> list:
-            if order_metric is not None:
-                try:
-                    rows = conn.execute(
-                        f"SELECT {_q(col)} AS v, "
-                        f"SUM(TRY_CAST({_q(order_metric.column_name)} AS DOUBLE)) AS tot "
-                        f"FROM {_q(table)} WHERE {where} "
-                        f"GROUP BY 1 ORDER BY tot DESC NULLS LAST, v",
-                        params,
-                    ).fetchall()
-                    return [r[0] for r in rows if r[0] is not None]
-                except Exception:
-                    pass  # bad/missing column type → fall back to alphabetical
+        def _metric_ordered(col: str) -> list | None:
+            if order_metric is None:
+                return None
+            try:
+                rows = conn.execute(
+                    f"SELECT {_q(col)} AS v, "
+                    f"SUM(TRY_CAST({_q(order_metric.column_name)} AS DOUBLE)) AS tot "
+                    f"FROM {_q(table)} WHERE {where} "
+                    f"GROUP BY 1 ORDER BY tot DESC NULLS LAST, v",
+                    params,
+                ).fetchall()
+                return [r[0] for r in rows if r[0] is not None]
+            except Exception:
+                return None  # bad/missing column type → caller falls back to natural
+
+        def _natural_ordered(col: str) -> list:
             rows = conn.execute(
-                f"SELECT DISTINCT {_q(col)} AS v FROM {_q(table)} WHERE {where} ORDER BY 1",
+                f"SELECT DISTINCT {_q(col)} AS v FROM {_q(table)} WHERE {where}",
                 params,
             ).fetchall()
-            return [r[0] for r in rows if r[0] is not None]
+            return sorted((r[0] for r in rows if r[0] is not None), key=_natural_key)
 
-        dims: dict[str, list] = {d.name: _values(d.column_name) for d in chart.dimensions}
+        dims: dict[str, list] = {}
+        for d in effective_dimensions(chart, _columns(conn, table)):
+            vals = _metric_ordered(d.column_name) if d.value_order == "metric" else None
+            dims[d.name] = vals if vals is not None else _natural_ordered(d.column_name)
 
         date_min = date_max = None
         if tc:
@@ -227,7 +253,7 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
     if req.granularity not in _GRANULARITY:
         raise ValueError(f"invalid granularity '{req.granularity}'")
 
-    dim_by_name = {d.name: d for d in chart.dimensions}
+    dim_by_name = {d.name: d for d in effective_dimensions(chart, cache_columns(chart.id))}
     metric_by_name = {m.name: m for m in chart.metrics}
 
     requested_dims = list(dim_by_name) if req.dimensions is None else req.dimensions

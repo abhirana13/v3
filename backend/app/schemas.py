@@ -53,6 +53,7 @@ class DimensionIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     column_name: str = Field(min_length=1, max_length=128)
     kind: Literal["regular", "time"] = "regular"
+    value_order: Literal["natural", "metric"] = "natural"  # filter-value ordering
     data_type: str | None = None  # introspection hint; not persisted
 
 
@@ -60,6 +61,7 @@ class DimensionOut(DimensionIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
     display_order: int
+    derived: bool = False  # true => computed in the backend, not a query column (not editable)
 
 
 class MetricIn(BaseModel):

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.backpop import run_backpop
+from app.backpop import request_cancel, run_backpop
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.models import BackpopRun
@@ -27,6 +27,18 @@ def trigger_backpop(
         to_date=payload.to_date,
         batch_size=payload.batch_size,
     )
+    return run
+
+
+@router.post("/{chart_id}/backpop-runs/{run_id}/cancel", response_model=BackpopRunRead)
+def cancel_backpop(chart_id: int, run_id: int, db: Session = Depends(get_db)):
+    """Request cancellation of a running backpop. The run's loop stops at the next
+    batch boundary and is marked 'cancelled'; rows already written are kept."""
+    run = db.get(BackpopRun, run_id)
+    if run is None or run.chart_id != chart_id:
+        raise HTTPException(status_code=404, detail="backpop run not found")
+    if run.status == "running":
+        request_cancel(run_id)
     return run
 
 

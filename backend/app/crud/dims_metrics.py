@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 
+from app.derived_dims import DERIVED_NAMES
 from app.models import Chart, Dimension, Metric
 from app.schemas import DimsMetricsIn
 
@@ -18,12 +19,15 @@ def replace(db: Session, chart_id: int, payload: DimsMetricsIn) -> Chart | None:
     chart.metrics.clear()
     db.flush()
 
-    for idx, d in enumerate(payload.dimensions):
+    # never persist a backend-derived dimension (e.g. country_tier) as a real one
+    saved_dims = [d for d in payload.dimensions if d.name not in DERIVED_NAMES]
+    for idx, d in enumerate(saved_dims):
         chart.dimensions.append(
             Dimension(
                 name=d.name,
                 column_name=d.column_name,
                 kind=d.kind,
+                value_order=d.value_order,
                 display_order=idx,
             )
         )

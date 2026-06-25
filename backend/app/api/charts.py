@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.backpop import run_backpop
+from app.backpop.duckdb_writer import drop_table
 from app.connections.postgres import SessionLocal, get_db
 from app.crud import charts as crud_charts
 from app.models import BackpopRun
@@ -107,3 +108,6 @@ def update_chart(chart_id: int, payload: ChartUpdate, db: Session = Depends(get_
 def delete_chart(chart_id: int, db: Session = Depends(get_db)):
     if not crud_charts.delete(db, chart_id):
         raise HTTPException(status_code=404, detail="chart not found")
+    # Also discard the chart's cached aggregates so no orphan chart_<id>_data
+    # table is left behind in DuckDB (metadata cascade only covers Postgres).
+    drop_table(chart_id)

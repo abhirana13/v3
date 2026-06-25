@@ -62,6 +62,46 @@ def drop_table(chart_id: int) -> None:
         conn.close()
 
 
+def cache_columns(chart_id: int) -> set[str]:
+    """Column names in a chart's cache table (empty set if it doesn't exist yet)."""
+    conn = duckdb_conn.get_connection()
+    try:
+        table = table_name(chart_id)
+        if not conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+        ).fetchone():
+            return set()
+        return {r[1] for r in conn.execute(f'PRAGMA table_info({_quote(table)})').fetchall()}
+    finally:
+        conn.close()
+
+
+def materialize_derived(chart) -> None:
+    """Compute backend-defined derived dimension columns into the cache (e.g.
+    country_tier from country) when the query doesn't already supply them.
+    Recomputed on each backpop so appended rows and mapping changes stay in sync."""
+    from app.derived_dims import DERIVED_DIMENSIONS, case_sql
+
+    dim_names = {d.name for d in chart.dimensions}
+    conn = duckdb_conn.get_connection()
+    try:
+        table = table_name(chart.id)
+        if not conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+        ).fetchone():
+            return
+        cols = {r[1] for r in conn.execute(f'PRAGMA table_info({_quote(table)})').fetchall()}
+        for d in DERIVED_DIMENSIONS:
+            # skip if the query already supplies this dim, or there's no source column
+            if d.name in dim_names or d.source_column not in cols:
+                continue
+            if d.name not in cols:
+                conn.execute(f'ALTER TABLE {_quote(table)} ADD COLUMN {_quote(d.name)} VARCHAR')
+            conn.execute(f'UPDATE {_quote(table)} SET {_quote(d.name)} = {case_sql(d)}')
+    finally:
+        conn.close()
+
+
 def present_dates(
     chart_id: int, time_column: str, from_date: date, to_date: date
 ) -> set[date]:

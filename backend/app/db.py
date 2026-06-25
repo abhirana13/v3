@@ -66,6 +66,15 @@ def ensure_schema(eng=None) -> None:
                 conn.execute(
                     text("ALTER TABLE metrics ALTER COLUMN column_name DROP NOT NULL")
                 )
+        if "dimensions" in inspector.get_table_names():
+            dim_cols = {c["name"] for c in inspector.get_columns("dimensions")}
+            if "value_order" not in dim_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE dimensions "
+                        "ADD COLUMN value_order VARCHAR NOT NULL DEFAULT 'natural'"
+                    )
+                )
 
     # Seed cache_query_hash for charts that don't have one yet, treating an existing
     # cache as built from the current query. This lets a *future* query edit be detected

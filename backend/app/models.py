@@ -81,6 +81,9 @@ class Dimension(Base):
     name = Column(String(128), nullable=False)
     column_name = Column(String(128), nullable=False)
     kind = Column(String(16), nullable=False, default="regular")
+    # filter-dropdown value ordering: "natural" (number-aware label sort, default) or
+    # "metric" (descending by the primary metric's total — biggest contributors first)
+    value_order = Column(String(16), nullable=False, default="natural", server_default="natural")
     display_order = Column(Integer, nullable=False, default=0)
 
     chart = relationship("Chart", back_populates="dimensions")

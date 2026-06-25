@@ -18,6 +18,11 @@ class Settings(BaseSettings):
 
     duckdb_path: str = "/data/aggregates.duckdb"
 
+    # Trailing window (in days, ending today) that backpopulation ALWAYS re-pulls and
+    # overwrites in daily+append mode, so late-arriving / restated recent data is picked
+    # up without a query change. Older days keep the cheap fill-missing (skip) behavior.
+    backpop_refresh_window_days: int = 4
+
     log_level: str = "INFO"
 
 
