@@ -24,6 +24,7 @@ jobs:
             --timeout-seconds 600 \
             --parameters 'commands=[
               "set -e",
+              "export HOME=/root",
               "git config --global --add safe.directory /opt/tools/analytics-dashboard",
               "cd /opt/tools/analytics-dashboard",
               "git pull origin main",
