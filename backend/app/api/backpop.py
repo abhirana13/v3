@@ -26,6 +26,7 @@ def trigger_backpop(
         from_date=payload.from_date,
         to_date=payload.to_date,
         batch_size=payload.batch_size,
+        force=payload.force,
     )
     return run
 

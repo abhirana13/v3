@@ -41,10 +41,15 @@ def _refresh_cutoff(today: date) -> date:
     return today - timedelta(days=max(1, settings.backpop_refresh_window_days) - 1)
 
 
-def _batch_cache_strategy(chart: Chart, batch: DateBatch, refresh_cutoff: date) -> str:
-    """Per-batch write strategy. Batched windows always replace their range. In daily
-    mode, days inside the trailing refresh window replace (overwrite late-arriving
-    data); older days keep the chart's strategy (append = insert the missing day)."""
+def _batch_cache_strategy(
+    chart: Chart, batch: DateBatch, refresh_cutoff: date, force: bool = False
+) -> str:
+    """Per-batch write strategy. A forced run replaces every day in range (overwrites
+    even old cached days — needs a time_column to delete by). Batched windows always
+    replace their range. In daily mode, days inside the trailing refresh window replace
+    (overwrite late-arriving data); older days keep the chart's strategy."""
+    if force and chart.time_column:
+        return "replace"
     if chart.cur_date_behavior == "batched":
         return "replace"
     if chart.time_column and batch.start_date >= refresh_cutoff:
@@ -53,7 +58,8 @@ def _batch_cache_strategy(chart: Chart, batch: DateBatch, refresh_cutoff: date) 
 
 
 def _compute_batches(
-    chart: Chart, from_date: date, to_date: date, batch_size: int, refresh_cutoff: date
+    chart: Chart, from_date: date, to_date: date, batch_size: int, refresh_cutoff: date,
+    force: bool = False,
 ) -> list[DateBatch]:
     """Batch shape is driven by the chart's ``cur_date_behavior``:
 
@@ -61,14 +67,15 @@ def _compute_batches(
       that day. With ``cache_strategy == "append"`` and a ``time_column`` we
       fill-missing (skip days already cached) — EXCEPT days inside the trailing
       refresh window (on/after ``refresh_cutoff``), which are always re-pulled so
-      late-arriving data is caught. Pair with ``WHERE d = '{CUR_DATE_HIPHEN}'``.
+      late-arriving data is caught. A ``force`` run re-pulls EVERY day in range
+      (no skip). Pair with ``WHERE d = '{CUR_DATE_HIPHEN}'``.
     - ``"batched"`` — contiguous ``batch_size``-day windows over the whole range.
       ``{CUR_DATE_HIPHEN}`` is only the window's *last* day, so the query must span
       the window with ``BETWEEN '{START_DATE}' AND '{END_DATE}'``.
     """
     if chart.cur_date_behavior == "daily":
         days = _dates_in_range(from_date, to_date)
-        if chart.cache_strategy == "append" and chart.time_column:
+        if not force and chart.cache_strategy == "append" and chart.time_column:
             present = duckdb_writer.present_dates(
                 chart.id, chart.time_column, from_date, to_date
             )
@@ -144,10 +151,12 @@ def _create_run(
     return run
 
 
-def _run_batches(db: Session, run: BackpopRun, chart: Chart) -> BackpopRun:
+def _run_batches(
+    db: Session, run: BackpopRun, chart: Chart, force: bool = False
+) -> BackpopRun:
     """Execute the batches for an already-created run, checking for cancellation
     between batches. Each batch is committed as it lands, so a cancel/failure keeps
-    the rows already written."""
+    the rows already written. ``force`` re-pulls and overwrites every day in range."""
     # If the query/variables changed since the cache was built, the cache is stale —
     # drop it so this run rebuilds from scratch (also picking up column changes).
     current_hash = query_hash(chart)
@@ -157,7 +166,7 @@ def _run_batches(db: Session, run: BackpopRun, chart: Chart) -> BackpopRun:
     today = datetime.now(timezone.utc).date()
     refresh_cutoff = _refresh_cutoff(today)
     batches = _compute_batches(
-        chart, run.from_date, run.to_date, run.batch_size, refresh_cutoff
+        chart, run.from_date, run.to_date, run.batch_size, refresh_cutoff, force=force
     )
     static_vars = dict(chart.variables or {})
 
@@ -171,12 +180,15 @@ def _run_batches(db: Session, run: BackpopRun, chart: Chart) -> BackpopRun:
                 break
             sql = substitute(chart.query, static_vars, batch)
             rows, cols = _execute_redshift(sql)
-            batch_cache = _batch_cache_strategy(chart, batch, refresh_cutoff)
+            batch_cache = _batch_cache_strategy(chart, batch, refresh_cutoff, force=force)
             # don't let an empty re-fetch wipe an already-cached refresh-window day
             # (transient blip / data not in yet) — keep what's there until real rows
-            # come back. Batched windows keep their existing replace-on-empty behavior.
+            # come back. A forced run is an explicit "match Redshift for this range",
+            # so it IS allowed to clear a day that now returns no rows. Batched windows
+            # keep their existing replace-on-empty behavior.
             wipes_on_empty = (
-                batch_cache == "replace"
+                not force
+                and batch_cache == "replace"
                 and chart.cur_date_behavior == "daily"
                 and not rows
             )
@@ -214,9 +226,11 @@ def run_backpop(
     from_date: date | None = None,
     to_date: date | None = None,
     batch_size: int | None = None,
+    force: bool = False,
 ) -> BackpopRun:
     """Create the run and execute its batches. Synchronous: the run is committed as
     'running' up front (so polling sees it) and progresses per batch; a concurrent
-    cancel request can stop it between batches."""
+    cancel request can stop it between batches. ``force`` re-pulls and overwrites every
+    day in range (for restatements), ignoring the fill-missing skip."""
     run = _create_run(db, chart_id, from_date, to_date, batch_size)
-    return _run_batches(db, run, db.get(Chart, chart_id))
+    return _run_batches(db, run, db.get(Chart, chart_id), force=force)

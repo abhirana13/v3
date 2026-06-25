@@ -244,13 +244,13 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     await loadRuns(id)
   }
 
-  const onSaveBackpopulate = async (range: { start: string; end: string }) => {
-    setSaving(true); setSaveError(null); setSaveOk(null); setToast('Backpopulation started…')
+  const onSaveBackpopulate = async (range: { start: string; end: string; force?: boolean }) => {
+    setSaving(true); setSaveError(null); setSaveOk(null); setToast(range.force ? 'Force backpopulation started…' : 'Backpopulation started…')
     try {
       const id = await ensureSaved()
       if (id == null) { setSaving(false); setToast(null); return }
       if (generated) await putDimsMetrics(id)
-      const run = await api.backpopulate(id, { from_date: range.start, to_date: range.end, batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)) })
+      const run = await api.backpopulate(id, { from_date: range.start, to_date: range.end, batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)), force: range.force })
       await loadRuns(id)
       onSaved(id) // refresh chart list in the background; stay on this page
       if (run.status === 'success') {

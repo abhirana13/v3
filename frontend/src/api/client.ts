@@ -48,7 +48,7 @@ export const api = {
   updateChart: (id: number, body: ChartWriteBody) => json<ChartFull>(`/charts/${id}`, jsonBody('PUT', body)),
   introspect: (id: number) => json<IntrospectionResult>(`/charts/${id}/introspect`, { method: 'POST' }),
   // body omitted => server runs the chart's default window (default_backpop_days, ending today)
-  backpopulate: (id: number, body?: { from_date: string; to_date: string; batch_size?: number }) =>
+  backpopulate: (id: number, body?: { from_date: string; to_date: string; batch_size?: number; force?: boolean }) =>
     json<BackpopRun>(
       `/charts/${id}/backpopulate`,
       body ? jsonBody('POST', body) : { method: 'POST' },

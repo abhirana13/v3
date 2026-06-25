@@ -450,6 +450,69 @@ def test_backpop_empty_refetch_does_not_wipe_cached_refresh_day(client, duckdb_p
     assert rows == [(100,)]  # preserved, not wiped
 
 
+def test_backpop_force_overwrites_present_older_day(client, duckdb_path):
+    """force=True re-pulls and overwrites every day in range, even an OLD cached day
+    that fill-missing (outside the refresh window) would otherwise skip."""
+    chart = _create_chart(client, name="force-overwrite")
+    day = "2026-05-01"  # well outside the trailing refresh window
+    description = [
+        ("event_date", 1082, None, None, None, None, None),
+        ("dau", 20, None, None, None, None, None),
+    ]
+    ctx1, _ = _mock_redshift(description, [(date(2026, 5, 1), 100)])
+    with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
+        client.post(
+            f"/charts/{chart['id']}/backpopulate",
+            json={"from_date": day, "to_date": day, "batch_size": 1},
+        )
+    # Redshift restated that old day; force re-pulls it (a normal run would skip it)
+    ctx2, _ = _mock_redshift(description, [(date(2026, 5, 1), 999)])
+    with patch("app.backpop.redshift_conn.connect", return_value=ctx2) as p:
+        r = client.post(
+            f"/charts/{chart['id']}/backpopulate",
+            json={"from_date": day, "to_date": day, "batch_size": 1, "force": True},
+        )
+    assert p.call_count == 1  # re-fetched despite being present + old
+    assert r.json()["status"] == "success"
+    con = duckdb.connect(duckdb_path)
+    rows = con.execute(
+        f"SELECT dau FROM {duckdb_writer.table_name(chart['id'])} ORDER BY 1"
+    ).fetchall()
+    con.close()
+    assert rows == [(999,)]  # overwritten — not [(100,)] (skip) nor [(100,), (999,)] (dup)
+
+
+def test_backpop_force_clears_day_that_now_returns_empty(client, duckdb_path):
+    """A forced run is an explicit 'match Redshift for this range': if a day now
+    returns no rows it IS cleared (unlike the auto refresh-window empty guard)."""
+    chart = _create_chart(client, name="force-wipe")
+    day = "2026-05-02"
+    description = [
+        ("event_date", 1082, None, None, None, None, None),
+        ("dau", 20, None, None, None, None, None),
+    ]
+    ctx1, _ = _mock_redshift(description, [(date(2026, 5, 2), 100)])
+    with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
+        client.post(
+            f"/charts/{chart['id']}/backpopulate",
+            json={"from_date": day, "to_date": day, "batch_size": 1},
+        )
+    ctx2, _ = _mock_redshift(description, [])  # force-refetch returns nothing
+    with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
+        r = client.post(
+            f"/charts/{chart['id']}/backpopulate",
+            json={"from_date": day, "to_date": day, "batch_size": 1, "force": True},
+        )
+    assert r.json()["status"] == "success"
+    con = duckdb.connect(duckdb_path)
+    rows = con.execute(
+        f"SELECT dau FROM {duckdb_writer.table_name(chart['id'])} "
+        f"WHERE CAST(event_date AS DATE) = DATE '2026-05-02'"
+    ).fetchall()
+    con.close()
+    assert rows == []  # wiped (the auto-window guard would instead have kept [(100,)])
+
+
 def test_cancel_stops_run_before_batches_and_marks_cancelled(client, db_session, duckdb_path):
     """A run whose id is flagged for cancellation stops without fetching, and keeps
     whatever was already written (here: nothing, cancelled before batch 1)."""

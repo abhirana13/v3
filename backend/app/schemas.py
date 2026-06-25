@@ -141,6 +141,9 @@ class BackpopRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
     batch_size: int | None = Field(default=None, gt=0)
+    # force: re-pull and OVERWRITE every day in range (ignore fill-missing skip),
+    # for one-off restatements of older days. Empty re-fetch clears the day.
+    force: bool = False
 
     @model_validator(mode="after")
     def _from_lte_to(self):

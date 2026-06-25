@@ -31,7 +31,7 @@ export interface ConfigViewProps {
   columns: ConfigColumn[]; onColumnChange: (name: string, patch: Partial<ConfigColumn>) => void
   onBack: () => void
   onDelete?: () => void
-  onSaveDraft: () => void; onSaveBackpopulate: (r: { start: string; end: string }) => void
+  onSaveDraft: () => void; onSaveBackpopulate: (r: { start: string; end: string; force: boolean }) => void
   backpopDefaults: { start: string; end: string }
   saving?: boolean; saveError?: string | null; saveOk?: string | null
   runs?: BackpopRun[]
