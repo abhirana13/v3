@@ -9,11 +9,25 @@ function fmtRunTime(iso: string): string {
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
+/* time the run took: completed - started, or "running…" while in flight */
+function fmtDuration(started: string, completed: string | null, status: string): string {
+  if (!completed) return status === 'running' ? 'running…' : '—'
+  const ms = new Date(completed).getTime() - new Date(started).getTime()
+  if (isNaN(ms) || ms < 0) return '—'
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60), rs = s % 60
+  if (m < 60) return rs ? `${m}m ${rs}s` : `${m}m`
+  const h = Math.floor(m / 60), rm = m % 60
+  return rm ? `${h}h ${rm}m` : `${h}h`
+}
+
 function RunStatusBadge({ status, error }: { status: string; error: string | null }) {
   const tone: Record<string, string> = {
     success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
     failed: 'border-rose-200 bg-rose-50 text-rose-700',
     running: 'border-amber-200 bg-amber-50 text-amber-700',
+    cancelled: 'border-slate-300 bg-slate-100 text-slate-600',
   }
   return (
     <span title={error || undefined} className={'inline-flex items-center rounded border px-1.5 py-0.5 text-[11px] font-semibold capitalize ' + (tone[status] || 'border-slate-200 bg-slate-50 text-slate-600')}>
@@ -23,7 +37,7 @@ function RunStatusBadge({ status, error }: { status: string; error: string | nul
 }
 
 const RUNS_PER_PAGE = 5
-export function BackpopHistory({ runs }: { runs: BackpopRun[] }) {
+export function BackpopHistory({ runs, onCancel }: { runs: BackpopRun[]; onCancel?: (runId: number) => void }) {
   const [open, setOpen] = useState(true)
   const [page, setPage] = useState(0)
   const pageCount = Math.max(1, Math.ceil(runs.length / RUNS_PER_PAGE))
@@ -57,6 +71,7 @@ export function BackpopHistory({ runs }: { runs: BackpopRun[] }) {
                   <th className="px-3 py-2">Status</th>
                   <th className="px-3 py-2 text-right">Rows</th>
                   <th className="px-3 py-2 text-right">Batches</th>
+                  <th className="px-3 py-2 text-right">Time</th>
                 </tr>
               </thead>
               <tbody>
@@ -64,9 +79,17 @@ export function BackpopHistory({ runs }: { runs: BackpopRun[] }) {
                   <tr key={r.id} className="border-t border-slate-100 hover:bg-slate-50/60">
                     <td className="whitespace-nowrap px-3 py-2 text-slate-600">{fmtRunTime(r.started_at)}</td>
                     <td className="whitespace-nowrap px-3 py-2 font-mono text-[12px] text-slate-600">{r.from_date} → {r.to_date}</td>
-                    <td className="px-3 py-2"><RunStatusBadge status={r.status} error={r.error_message} /></td>
+                    <td className="px-3 py-2">
+                      <span className="flex items-center gap-2">
+                        <RunStatusBadge status={r.status} error={r.error_message} />
+                        {r.status === 'running' && onCancel && (
+                          <button onClick={() => onCancel(r.id)} className="rounded border border-rose-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-rose-600 hover:bg-rose-50">Cancel</button>
+                        )}
+                      </span>
+                    </td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-700">{r.row_count.toLocaleString()}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-500">{r.batches_completed}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{fmtDuration(r.started_at, r.completed_at, r.status)}</td>
                   </tr>
                 ))}
               </tbody>

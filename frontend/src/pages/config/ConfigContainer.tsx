@@ -121,8 +121,8 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
         const dimNames = dm.dimensions.map((d) => d.name)
         if (dm.dimensions.length || dm.metrics.length) {
           setColumns([
-            ...dm.dimensions.map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], included: true })),
-            ...dm.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: m.independent_dimensions || [], included: true })),
+            ...dm.dimensions.filter((d) => !d.derived).map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: d.value_order || 'natural', included: true })),
+            ...dm.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: m.independent_dimensions || [], formula: m.formula || null, decimals: m.decimals ?? 0, yAxis: m.y_axis || 'primary', unit: m.unit || null, included: true })),
           ])
           setDims((s) => ({ ...s, timeColumn: dm.time_column || '', xAxis: dm.time_column || dimNames[0] || '', dateFormat: dm.date_format || '%Y-%m-%d', axisOptions: [dm.time_column || '', ...dimNames].filter(Boolean), timeOptions: [dm.time_column || ''].filter(Boolean) }))
           setGenerated(true)
@@ -135,6 +135,17 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     })()
     return () => { alive = false }
   }, [target])
+
+  // keep the backpop history live without a manual refresh — picks up runs started
+  // here or from the chart view (poll while the tab is visible)
+  useEffect(() => {
+    const id = savedId ?? (typeof target === 'number' ? target : null)
+    if (id == null) return
+    const t = setInterval(() => {
+      if (!document.hidden) api.backpopRuns(id).then(setRuns).catch(() => {})
+    }, 4000)
+    return () => clearInterval(t)
+  }, [savedId, target])
 
   const buildBody = useCallback((): ChartWriteBody => ({
     name: meta.title.trim(), source: meta.source, certified: meta.certified, query,
@@ -168,9 +179,14 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       if (id == null) { setGenerating(false); return }
       const r = await api.introspect(id)
       const dimNames = r.dimensions.map((d) => d.name)
+      const introspected = new Set([...r.dimensions.map((d) => d.name), ...r.metrics.map((m) => m.name)])
+      // re-introspecting reads the query's columns; formula metrics aren't column-backed,
+      // so keep the ones the user built in the chart view rather than dropping them
+      const keptFormulas = columns.filter((c) => c.classification === 'Metric' && c.formula && !introspected.has(c.name))
       setColumns([
-        ...r.dimensions.map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], included: true })),
+        ...r.dimensions.map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: 'natural', included: true })),
         ...r.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: [], included: true })),
+        ...keptFormulas,
       ])
       setDims((s) => ({ ...s, timeColumn: r.time_column || '', xAxis: r.time_column || dimNames[0] || '', axisOptions: [r.time_column || '', ...dimNames].filter(Boolean), timeOptions: [r.time_column || ''].filter(Boolean) }))
       setGenerated(true)
@@ -186,13 +202,19 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     const includedDims = columns.filter((c) => c.classification === 'Dimension' && c.included)
     const includedDimNames = new Set(includedDims.map((d) => d.name))
     const metricsPayload = columns.filter((c) => c.classification === 'Metric' && c.included).map((m) => ({
-      name: m.name, column_name: m.name,
+      name: m.name,
+      // formula metrics are not column-backed (the backend requires exactly one of
+      // column_name | formula); preserve everything edited in the chart view
+      column_name: m.formula ? null : m.name,
       independent_dimensions: (m.independentOf || []).filter((n) => includedDimNames.has(n)),
-      formula: null, y_axis: 'primary' as const, decimals: 0, unit: null,
+      formula: m.formula || null,
+      y_axis: m.yAxis || ('primary' as const),
+      decimals: m.decimals ?? 0,
+      unit: m.unit && m.unit !== 'None' ? m.unit : null,
     }))
     await api.putDimsMetrics(id, {
       time_column: dims.timeColumn || null,
-      dimensions: includedDims.map((d) => ({ name: d.name, column_name: d.name })),
+      dimensions: includedDims.map((d) => ({ name: d.name, column_name: d.name, value_order: d.valueOrder || 'natural' })),
       metrics: metricsPayload,
     })
   }
@@ -214,6 +236,14 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     try { setRuns(await api.backpopRuns(id)) } catch { /* history is best-effort */ }
   }
 
+  const onCancelRun = async (runId: number) => {
+    const id = savedId ?? (typeof target === 'number' ? target : null)
+    if (id == null) return
+    setToast('Cancelling backpopulation…')
+    try { await api.cancelBackpop(id, runId) } catch { /* the history poll will reflect it */ }
+    await loadRuns(id)
+  }
+
   const onSaveBackpopulate = async (range: { start: string; end: string }) => {
     setSaving(true); setSaveError(null); setSaveOk(null); setToast('Backpopulation started…')
     try {
@@ -225,6 +255,8 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       onSaved(id) // refresh chart list in the background; stay on this page
       if (run.status === 'success') {
         setToast(`✓ Backpopulation complete · ${run.row_count.toLocaleString()} rows (${run.from_date} → ${run.to_date})`)
+      } else if (run.status === 'cancelled') {
+        setToast(`Backpopulation cancelled · ${run.row_count.toLocaleString()} rows kept`)
       } else {
         const why = explainRunError(run.error_message || '')
         setSaveError(`${why}${run.error_message ? ' — ' + run.error_message.slice(0, 200) : ''}`)
@@ -285,7 +317,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       onBack={onBack} onDelete={savedId != null ? onDelete : undefined}
       onSaveDraft={onSaveDraft} onSaveBackpopulate={onSaveBackpopulate} backpopDefaults={backpopDefaults}
       saving={saving} saveError={saveError} saveOk={saveOk}
-      runs={runs} toast={toast}
+      runs={runs} onCancelRun={onCancelRun} toast={toast}
     />
   )
 }

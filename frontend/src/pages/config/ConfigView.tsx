@@ -35,6 +35,7 @@ export interface ConfigViewProps {
   backpopDefaults: { start: string; end: string }
   saving?: boolean; saveError?: string | null; saveOk?: string | null
   runs?: BackpopRun[]
+  onCancelRun?: (runId: number) => void
   toast?: string | null
 }
 
@@ -90,7 +91,7 @@ export function ConfigView(p: ConfigViewProps) {
               <ConfigField label="Default Date Range" required><ConfigSelect value={p.cache.defaultDateRange} onChange={(v) => p.onCacheChange({ defaultDateRange: v })} options={p.cacheOptions.dateRange} center /></ConfigField>
               <ConfigField label="Refresh Interval" required><ConfigSelect value={p.cache.refreshInterval} onChange={(v) => p.onCacheChange({ refreshInterval: v })} options={p.cacheOptions.refresh} center /></ConfigField>
               <ConfigField label="{CUR_DATE_HIPHEN} Behaviour" required hint="Daily: one query per day — pair with = '{CUR_DATE_HIPHEN}'. Batched: N-day windows — pair with BETWEEN '{START_DATE}' AND '{END_DATE}'."><ConfigSelect value={p.cache.curDateBehaviour} onChange={(v) => p.onCacheChange({ curDateBehaviour: v })} options={p.cacheOptions.curDate} center /></ConfigField>
-              <ConfigField label="Chart Cache" required hint="v1 appends (fill-missing) on backpopulation."><ConfigSelect value={p.cache.chartCache} options={p.cacheOptions.chartCache} disabled center /></ConfigField>
+              <ConfigField label="Chart Cache" required hint="Appends (fill-missing): older cached days are skipped, but the last 4 days are always re-pulled so late-arriving data is caught."><ConfigSelect value={p.cache.chartCache} options={p.cacheOptions.chartCache} disabled center /></ConfigField>
               <ConfigField label="Default Backpopulation Days" required><ConfigInput type="number" value={p.cache.backpopDays} onChange={(v) => p.onCacheChange({ backpopDays: v })} /></ConfigField>
               <ConfigField label="Backpopulation Batch Size" required><ConfigInput type="number" value={p.cache.backpopBatch} onChange={(v) => p.onCacheChange({ backpopBatch: v })} /></ConfigField>
             </div>
@@ -121,7 +122,7 @@ export function ConfigView(p: ConfigViewProps) {
 
           {(p.mode === 'edit' || (p.runs && p.runs.length > 0)) && (
             <div className="mb-4 rounded-xl bg-white p-5 shadow-sm">
-              <BackpopHistory runs={p.runs || []} />
+              <BackpopHistory runs={p.runs || []} onCancel={p.onCancelRun} />
             </div>
           )}
 

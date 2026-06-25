@@ -30,7 +30,7 @@ export function HoverCard({ title, rows, shortLabel, longLabel, total }: {
   title: string; rows: HoverRow[]; shortLabel: string; longLabel: string; total?: HoverTotal | null
 }) {
   return (
-    <div className="w-[268px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl">
+    <div className="w-[300px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl">
       {/* date + (optional) total aggregate; no labels, deltas reuse the same color format */}
       <div className="flex items-center border-b border-slate-100 px-3.5 py-2.5">
         <span className="text-[13px] font-bold text-slate-800">{title}</span>
@@ -42,12 +42,12 @@ export function HoverCard({ title, rows, shortLabel, longLabel, total }: {
           </span>
         )}
       </div>
-      <div className="grid grid-cols-[1fr_40px_52px_52px] items-center gap-x-3 px-3.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+      <div className="grid grid-cols-[1fr_auto_46px_46px] items-center gap-x-2.5 px-3.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
         <span>Series</span><span className="text-right">Val</span><span className="text-right">{shortLabel}</span><span className="text-right">{longLabel}</span>
       </div>
       <div className="max-h-[280px] overflow-y-auto px-3.5 pb-2.5">
         {rows.map((r) => (
-          <div key={r.name} className="grid grid-cols-[1fr_40px_52px_52px] items-center gap-x-3 py-[3px]">
+          <div key={r.name} className="grid grid-cols-[1fr_auto_46px_46px] items-center gap-x-2.5 py-[3px]">
             <span className="flex items-center gap-2 truncate">
               <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: r.color }} />
               <span className="truncate text-[13px] text-slate-700">{r.name}</span>

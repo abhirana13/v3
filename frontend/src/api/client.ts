@@ -54,6 +54,8 @@ export const api = {
       body ? jsonBody('POST', body) : { method: 'POST' },
     ),
   backpopRuns: (id: number) => json<BackpopRun[]>(`/charts/${id}/backpop-runs`),
+  cancelBackpop: (chartId: number, runId: number) =>
+    json<BackpopRun>(`/charts/${chartId}/backpop-runs/${runId}/cancel`, { method: 'POST' }),
   freshness: (id: number) => json<Freshness>(`/charts/${id}/freshness`),
   chartsOverview: () => json<ChartOverview[]>('/charts/overview'),
   deleteChart: (id: number) =>
@@ -64,7 +66,7 @@ export const api = {
   getDimValues: (id: number, from?: string | null, to?: string | null) =>
     json<DimValues>(`/charts/${id}/dim-values${qs({ from_date: from, to_date: to })}`),
   getData: (id: number, q: DataQuery) => json<DataResponse>(`/charts/${id}/data${dataQuery(q)}`),
-  putDimsMetrics: (id: number, body: { time_column: string | null; dimensions: { name: string; column_name: string }[]; metrics: MetricCfg[] }) =>
+  putDimsMetrics: (id: number, body: { time_column: string | null; dimensions: { name: string; column_name: string; value_order?: 'natural' | 'metric' }[]; metrics: MetricCfg[] }) =>
     json<DimsMetrics>(`/charts/${id}/dims-metrics`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },

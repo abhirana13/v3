@@ -145,7 +145,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
 
       if (splitDims.length === 0) {
         // time-only aggregate: one series per visible metric (unchanged behavior)
-        setChartSeries(visibleMetrics.map((m) => ({ key: m.key, label: m.name, color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key })))
+        setChartSeries(visibleMetrics.map((m) => ({ key: m.key, label: m.name, color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name })))
         setChartData(resp.rows.map((r) => {
           const row: ChartRow = { date: r[tc] as string }
           for (const n of names) row[n] = r[n] ?? null
@@ -170,7 +170,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       const series: UISeries[] = []
       let ci = 0
       for (const combo of order) for (const m of visibleMetrics) {
-        series.push({ key: sKey(m.key, combo), label: multi ? `${m.name} · ${combo}` : combo, color: PALETTE[ci++ % PALETTE.length], axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key })
+        series.push({ key: sKey(m.key, combo), label: multi ? `${m.name} · ${combo}` : combo, color: PALETTE[ci++ % PALETTE.length], axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo })
       }
       setChartSeries(series)
 

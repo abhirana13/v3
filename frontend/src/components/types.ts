@@ -31,6 +31,8 @@ export interface UISeries {
   unit?: string
   decimals?: number
   metricKey?: string // which metric this series belongs to (cuts of one metric share it)
+  metricLabel?: string // the metric's display name (legend groups split series under it)
+  comboLabel?: string // when split, the dimension-value cut (e.g. "D0", "US · iOS")
 }
 
 export type ChartRow = Record<string, number | string | null>

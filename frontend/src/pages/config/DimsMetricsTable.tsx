@@ -6,6 +6,13 @@ export interface ConfigColumn {
   classification: 'Dimension' | 'Metric'
   dataType: string
   independentOf: string[]
+  valueOrder?: 'natural' | 'metric'
+  // metric display config — carried through so saving from the config screen never
+  // wipes a formula metric (formula/decimals/axis/unit are edited in the chart view)
+  formula?: string | null
+  decimals?: number
+  yAxis?: 'primary' | 'secondary'
+  unit?: string | null
   included: boolean
 }
 
@@ -33,6 +40,7 @@ export function DimsMetricsTable({ xAxis, timeColumn, dateFormat, axisOptions, t
               <th className="px-3 py-2">Classification</th>
               <th className="px-3 py-2">Data type</th>
               <th className="px-3 py-2">Independent of</th>
+              <th className="px-3 py-2">Value order</th>
               <th className="px-3 py-2 text-center">Include</th>
             </tr>
           </thead>
@@ -40,7 +48,13 @@ export function DimsMetricsTable({ xAxis, timeColumn, dateFormat, axisOptions, t
             {columns.map((c) => (
               <tr key={c.name} className="border-t border-slate-100 hover:bg-slate-50/60">
                 <td className="px-3 py-2 text-slate-300"><CIc.grip /></td>
-                <td className="px-3 py-2 font-mono font-medium text-slate-700">{c.name}</td>
+                <td className="px-3 py-2 font-mono font-medium text-slate-700">
+                  {c.name}
+                  {c.classification === 'Metric' && c.formula ? (
+                    <span className="ml-2 inline-block rounded bg-violet-50 px-1.5 py-0.5 align-middle text-[11px] font-normal text-violet-600"
+                      title="Formula metric — edit the formula, decimals and axis in the chart's metric settings">ƒ {c.formula}</span>
+                  ) : null}
+                </td>
                 <td className="px-3 py-2">
                   <div className="inline-flex overflow-hidden rounded-md border border-slate-200">
                     {(['Dimension', 'Metric'] as const).map((opt) => (
@@ -53,6 +67,15 @@ export function DimsMetricsTable({ xAxis, timeColumn, dateFormat, axisOptions, t
                 <td className="px-3 py-2">
                   {c.classification === 'Metric'
                     ? <IndependentPicker dimNames={dimNames} selected={c.independentOf || []} onChange={(arr) => onColumnChange(c.name, { independentOf: arr })} />
+                    : <span className="text-slate-300">—</span>}
+                </td>
+                <td className="px-3 py-2">
+                  {c.classification === 'Dimension'
+                    ? <select value={c.valueOrder || 'natural'} onChange={(e) => onColumnChange(c.name, { valueOrder: e.target.value as 'natural' | 'metric' })}
+                        title="How filter values are ordered in the chart" className="rounded-md border border-slate-200 px-2 py-1 text-[12px] text-slate-700 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+                        <option value="natural">Natural (A–Z, numbers)</option>
+                        <option value="metric">By value (largest first)</option>
+                      </select>
                     : <span className="text-slate-300">—</span>}
                 </td>
                 <td className="px-3 py-2 text-center">

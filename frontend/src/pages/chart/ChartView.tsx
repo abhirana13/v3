@@ -19,6 +19,10 @@ import { applyMovingAverage, applyPercentage, buildCategorical } from './transfo
 
 const DEFAULT_CHART_OPTIONS: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: false, logScale: false }
 
+// Legend hide is keyed by the cut (comboLabel) when split — so hiding a cut applies
+// to every metric and survives switching metrics — otherwise by the metric's own key.
+const hideKey = (s: UISeries) => s.comboLabel ?? s.key
+
 /* ------------------------------------------------------------------ ChartView */
 export interface ChartViewProps {
   title: string; chartId: number | string; status?: string
@@ -85,7 +89,7 @@ export function ChartView(p: ChartViewProps) {
   const { displayData, displaySeries, legendSeries } = useMemo(() => {
     const base = xActive ? buildCategorical(p.chartData, p.chartSeries) : { data: p.chartData, series: p.chartSeries }
     let data = base.data
-    let series = base.series.filter((s) => !hidden.has(s.key))
+    let series = base.series.filter((s) => !hidden.has(hideKey(s)))
     if (!xActive) {
       if (pct) { const o = applyPercentage(data, series); data = o.data; series = o.series }
       if (ma) data = applyMovingAverage(data, series, maWindow)
@@ -95,24 +99,42 @@ export function ChartView(p: ChartViewProps) {
 
   const toggleHidden = (key: string) => setHidden((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n })
   const showAllSeries = () => setHidden(new Set())
-  const hideAllSeries = () => setHidden(new Set(legendSeries.map((s) => s.key)))
-  const allLinesHidden = legendSeries.length > 0 && legendSeries.every((s) => hidden.has(s.key))
+  const hideAllSeries = () => setHidden(new Set(legendSeries.map(hideKey)))
+  const allLinesHidden = legendSeries.length > 0 && legendSeries.every((s) => hidden.has(hideKey(s)))
   const onToggleAllLines = () => (allLinesHidden ? showAllSeries() : hideAllSeries())
 
   const onExportPng = () => { const url = pngRef.current?.(); if (url) downloadPng(fileBase, url) }
   const onExportCsv = () => downloadCsv(fileBase, displayData, displaySeries)
 
-  const legend = (
-    <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
-      {legendSeries.map((s) => {
-        const off = hidden.has(s.key)
+  const legendChip = (s: UISeries, text: string) => {
+    const off = hidden.has(hideKey(s))
+    return (
+      <button key={s.key} type="button" onClick={() => toggleHidden(hideKey(s))} title={off ? 'Click to show' : 'Click to hide'}
+        className={'flex items-center gap-1.5 text-[12px] transition ' + (off ? 'text-slate-400 line-through opacity-50' : 'text-slate-600 hover:text-slate-900')}>
+        <span className="h-[3px] w-4 rounded-full" style={{ background: off ? '#cbd5e1' : s.color }} />{text}
+      </button>
+    )
+  }
+  // when split, keep the metric name as a header with its cuts grouped beneath it;
+  // otherwise a flat list of metric names
+  const isSplitLegend = !xActive && legendSeries.some((s) => s.comboLabel != null)
+  const legend = isSplitLegend ? (
+    <div className="flex flex-wrap items-start justify-center gap-x-8 gap-y-2">
+      {[...new Map(legendSeries.map((s) => [s.metricKey, s])).keys()].map((mk) => {
+        const group = legendSeries.filter((s) => s.metricKey === mk)
         return (
-          <button key={s.key} type="button" onClick={() => toggleHidden(s.key)} title={off ? 'Click to show' : 'Click to hide'}
-            className={'flex items-center gap-1.5 text-[12px] transition ' + (off ? 'text-slate-400 line-through opacity-50' : 'text-slate-600 hover:text-slate-900')}>
-            <span className="h-[3px] w-4 rounded-full" style={{ background: off ? '#cbd5e1' : s.color }} />{s.label}
-          </button>
+          <div key={mk} className="flex flex-col items-center gap-1">
+            <span className="text-[12px] font-semibold text-slate-700">{group[0]?.metricLabel || group[0]?.label}</span>
+            <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+              {group.map((s) => legendChip(s, s.comboLabel ?? s.label))}
+            </div>
+          </div>
         )
       })}
+    </div>
+  ) : (
+    <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
+      {legendSeries.map((s) => legendChip(s, s.label))}
     </div>
   )
   const maControl = ma ? (
@@ -227,6 +249,7 @@ export function ChartView(p: ChartViewProps) {
 
       <MetricSettingsModal
         open={p.settingsOpen} metric={p.settingsMetric} dimensionNames={p.dimensions.map((d) => d.label)}
+        metricNames={p.metrics.filter((m) => !m.formula && m.id !== p.settingsMetric?.id).map((m) => m.name)}
         error={p.settingsError} onClose={p.onCloseSettings} onApply={p.onApplySettings} onSave={p.onSaveSettings}
       />
 

@@ -1,17 +1,19 @@
 import { useEffect, useState } from 'react'
 import { Checkbox, Ic } from '../../components/primitives'
+import { FormulaBuilder } from './FormulaBuilder'
 
 /* --------------------------------------------------- MetricSettingsModal */
 export interface MetricDraft {
   id: string; name: string; formula?: string; independentFields?: string[]
   axis?: 'primary' | 'secondary'; decimals?: number; unit?: string; isNew?: boolean
 }
-export function MetricSettingsModal({ open, metric, dimensionNames, error, onClose, onApply, onSave }: {
-  open: boolean; metric: MetricDraft | null; dimensionNames: string[]; error?: string | null
+export function MetricSettingsModal({ open, metric, dimensionNames, metricNames, error, onClose, onApply, onSave }: {
+  open: boolean; metric: MetricDraft | null; dimensionNames: string[]; metricNames: string[]; error?: string | null
   onClose: () => void; onApply: (d: MetricDraft) => void; onSave: (d: MetricDraft) => void
 }) {
   const [draft, setDraft] = useState<MetricDraft>(metric || ({} as MetricDraft))
   const [indOpen, setIndOpen] = useState(false)
+  const [formulaValid, setFormulaValid] = useState(true)
   useEffect(() => { setDraft(metric || ({} as MetricDraft)) }, [metric, open])
   if (!open || !metric) return null
 
@@ -69,8 +71,13 @@ export function MetricSettingsModal({ open, metric, dimensionNames, error, onClo
           </div>
           <div>
             <label className={label}>Formula</label>
-            <input className={field + ' font-mono'} value={draft.formula || ''} onChange={(e) => set('formula', e.target.value)} placeholder="revenue / dau" />
-            <p className="mt-1 text-[11px] text-slate-400">Supports + − × ÷ and parentheses over other metric names. Leave blank for a base metric.</p>
+            <FormulaBuilder
+              key={metric.id}
+              initial={metric.formula || ''}
+              metrics={metricNames}
+              onChange={(f) => set('formula', f)}
+              onValidityChange={setFormulaValid}
+            />
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div>
@@ -94,8 +101,9 @@ export function MetricSettingsModal({ open, metric, dimensionNames, error, onClo
           {error && <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-600">{error}</div>}
         </div>
         <div className="flex items-center justify-end gap-2.5 border-t border-slate-100 bg-slate-50 px-5 py-3.5">
-          {!metric.isNew && <button onClick={() => onApply(draft)} className="rounded-md border border-slate-200 bg-white px-4 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100">Apply changes</button>}
-          <button onClick={() => onSave(draft)} className="rounded-md bg-sky-500 px-4 py-2 text-[13px] font-semibold text-white shadow-sm hover:bg-sky-600">Save changes</button>
+          {!formulaValid && <span className="mr-auto text-[12px] font-medium text-rose-500">Formula is incomplete</span>}
+          {!metric.isNew && <button onClick={() => onApply(draft)} disabled={!formulaValid} className="rounded-md border border-slate-200 bg-white px-4 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40">Apply changes</button>}
+          <button onClick={() => onSave(draft)} disabled={!formulaValid} className="rounded-md bg-sky-500 px-4 py-2 text-[13px] font-semibold text-white shadow-sm hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">Save changes</button>
         </div>
       </div>
     </div>

@@ -18,7 +18,10 @@ const fmtDate = (iso: string) => {
 }
 const fmtVal = (v: number, s: UISeries) => {
   const u = s.unit && s.unit !== 'None' ? s.unit : ''
-  const dp = s.decimals ?? 0
+  let dp = s.decimals ?? 0
+  // a non-zero value must never collapse to "0": widen precision (up to 6 dp) until a
+  // digit shows, so small ratio/formula metrics (e.g. 0.27) stay readable at low decimals
+  if (v !== 0) while (dp < 6 && Number(v.toFixed(dp)) === 0) dp++
   return (u === '$' ? '$' : '') + v.toLocaleString(undefined, { maximumFractionDigits: dp, minimumFractionDigits: 0 }) + (u === '%' ? '%' : '')
 }
 const numOr = (v: number | string | null | undefined): number | null => (typeof v === 'number' ? v : null)
@@ -97,12 +100,32 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
     if (!chart) return
     setHover(null)
 
-    const compact = (v: number, decimals = 1) => {
-      if (v == null) return ''
-      if (Math.abs(v) >= 1000) return (v / 1000).toFixed(decimals).replace(/\.0$/, '') + 'k'
-      return v.toFixed(decimals).replace(/\.0$/, '')
+    // Primary-axis label precision adapts to the data span so tight/near-1 ranges
+    // don't all collapse to the same label (0.95, 1.00, 1.05 → distinct, not all "1").
+    const primaryVals: number[] = []
+    for (const row of data) for (const s of series) {
+      if (s.axis === 'secondary') continue
+      const v = row[s.key]
+      if (typeof v === 'number') primaryVals.push(v)
+    }
+    let axisDec = 1
+    if (primaryVals.length) {
+      let mn = Infinity, mx = -Infinity
+      for (const v of primaryVals) { if (v < mn) mn = v; if (v > mx) mx = v }
+      const ref = (mx - mn) || Math.abs(mx) || 1
+      axisDec = ref >= 5 ? 0 : ref >= 0.5 ? 1 : 2
+    }
+    const compact = (v: number) => {
+      if (v == null || isNaN(v)) return ''
+      if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+      const s = v.toFixed(axisDec)
+      return axisDec >= 2 ? s : s.replace(/\.0$/, '') // keep 0.90 vs 1.00 distinct; tidy whole steps elsewhere
     }
     const hasSecondary = !percentStacked && series.some((s) => s.axis === 'secondary')
+    // dynamic (non-zero-based) y-axis: pad above & below the data so the line never
+    // sits flush on the floor/ceiling — a min value glued to the axis reads as "0".
+    const dynY = !percentStacked && !d.logScale && !d.zeroBase
+    const yPad: [string, string] = ['20%', '20%']
 
     const echartSeries = series.map((s) => ({
       name: s.label,
@@ -166,7 +189,8 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
           axisLabel: { color: '#94a3b8', fontSize: 11, formatter: percentStacked ? (v: number) => `${v}%` : (v: number) => compact(v) },
           min: percentStacked ? 0 : (d.logScale ? undefined : (d.zeroBase ? 0 : undefined)),
           max: percentStacked ? 100 : undefined,
-          scale: !percentStacked && !d.logScale && !d.zeroBase,
+          scale: dynY,
+          boundaryGap: dynY ? yPad : undefined,
         },
         {
           type: 'value', axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false },
@@ -177,7 +201,7 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
               return (sec && sec.unit === '$' ? '$' : '') + Number(v).toLocaleString(undefined, { maximumFractionDigits: sec ? (sec.decimals ?? 1) : 1 })
             },
           },
-          show: hasSecondary, scale: true,
+          show: hasSecondary, scale: true, boundaryGap: yPad,
         },
       ],
       series: echartSeries,

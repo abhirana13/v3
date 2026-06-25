@@ -59,6 +59,8 @@ export interface DimensionCfg {
   name: string
   column_name: string
   kind: string
+  value_order?: 'natural' | 'metric'
+  derived?: boolean // computed in the backend (e.g. country_tier) — usable as a filter, not editable
   data_type?: string | null
 }
 

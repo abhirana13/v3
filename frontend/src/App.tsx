@@ -53,7 +53,12 @@ export function App() {
       <ConfigContainer
         target={view.target}
         charts={charts || []}
-        onBack={() => setView({ name: 'chart' })}
+        onBack={() => {
+          // go back to the chart we were editing, not whatever chartId defaulted
+          // to (cs[0]) when this config view loaded from a ?config=<id> link
+          if (typeof view.target === 'number') setChartId(view.target)
+          setView({ name: 'chart' })
+        }}
         onSaved={async (id) => { await loadCharts(id) }}
         onDeleted={async () => {
           window.history.replaceState({}, '', window.location.pathname)
