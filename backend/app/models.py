@@ -32,6 +32,7 @@ class Chart(Base):
     default_backpop_days = Column(Integer, nullable=False, default=7)
     backpop_batch_size = Column(Integer, nullable=False, default=30)
     default_date_range_days = Column(Integer, nullable=False, default=90)
+    default_end_offset_days = Column(Integer, nullable=False, default=2, server_default="2")
     cur_date_behavior = Column(String(32), nullable=False, default="daily")
     cache_strategy = Column(String(32), nullable=False, default="append")
 

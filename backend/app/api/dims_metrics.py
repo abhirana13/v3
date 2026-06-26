@@ -42,6 +42,7 @@ def get_dims_metrics(chart_id: int, db: Session = Depends(get_db)):
     return DimsMetricsOut(
         time_column=chart.time_column,
         date_format=chart.date_format,
+        default_end_offset_days=chart.default_end_offset_days,
         dimensions=dims,
         metrics=chart.metrics,
     )
@@ -57,6 +58,7 @@ def put_dims_metrics(
     return DimsMetricsOut(
         time_column=chart.time_column,
         date_format=chart.date_format,
+        default_end_offset_days=chart.default_end_offset_days,
         dimensions=chart.dimensions,
         metrics=chart.metrics,
     )

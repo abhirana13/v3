@@ -36,6 +36,13 @@ def ensure_schema(eng=None) -> None:
             )
         if "cache_query_hash" not in cols:
             conn.execute(text("ALTER TABLE charts ADD COLUMN cache_query_hash VARCHAR"))
+        if "default_end_offset_days" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE charts "
+                    "ADD COLUMN default_end_offset_days INTEGER NOT NULL DEFAULT 2"
+                )
+            )
         if "chart_number" not in cols:
             conn.execute(text("ALTER TABLE charts ADD COLUMN chart_number INTEGER"))
             conn.execute(

@@ -13,6 +13,8 @@ class ChartBase(BaseModel):
     default_backpop_days: int = Field(default=7, gt=0)
     backpop_batch_size: int = Field(default=30, gt=0)
     default_date_range_days: int = Field(default=90, gt=0)
+    # chart opens showing data up to N days before today (the recency control)
+    default_end_offset_days: int = Field(default=2, ge=0)
     cur_date_behavior: Literal["daily", "batched"] = "daily"
     cache_strategy: str = "append"
     time_column: str | None = None
@@ -32,6 +34,7 @@ class ChartUpdate(BaseModel):
     default_backpop_days: int | None = Field(default=None, gt=0)
     backpop_batch_size: int | None = Field(default=None, gt=0)
     default_date_range_days: int | None = Field(default=None, gt=0)
+    default_end_offset_days: int | None = Field(default=None, ge=0)
     cur_date_behavior: Literal["daily", "batched"] | None = None
     certified: bool | None = None
     cache_strategy: str | None = None
@@ -133,6 +136,7 @@ class DimsMetricsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     time_column: str | None
     date_format: str | None
+    default_end_offset_days: int = 2
     dimensions: list[DimensionOut]
     metrics: list[MetricOut]
 
