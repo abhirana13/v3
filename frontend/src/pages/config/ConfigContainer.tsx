@@ -84,7 +84,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   const [cache, setCache] = useState<Record<string, string>>({
     defaultDateRange: 'Last 90 Days', refreshInterval: 'Daily',
     curDateBehaviour: curDateLabel('daily'), chartCache: CACHE_LABEL,
-    backpopDays: '7', backpopBatch: '30',
+    backpopDays: '7', backpopBatch: '30', dataRecency: '2',
   })
   const [query, setQuery] = useState('')
   const [queryTheme, setQueryTheme] = useState('light')
@@ -116,6 +116,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
           refreshInterval: c.refresh_interval.charAt(0).toUpperCase() + c.refresh_interval.slice(1),
           curDateBehaviour: curDateLabel(c.cur_date_behavior), chartCache: CACHE_LABEL,
           backpopDays: String(c.default_backpop_days), backpopBatch: String(c.backpop_batch_size),
+          dataRecency: String(c.default_end_offset_days ?? 2),
         })
         setQuery(c.query)
         const dimNames = dm.dimensions.map((d) => d.name)
@@ -153,6 +154,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     default_backpop_days: Math.max(1, parseInt(cache.backpopDays || '7', 10)),
     backpop_batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)),
     default_date_range_days: labelToDays(cache.defaultDateRange),
+    default_end_offset_days: Math.max(0, parseInt(cache.dataRecency || '2', 10)),
     cur_date_behavior: curDateValue(cache.curDateBehaviour), cache_strategy: 'append',
     date_format: dims.dateFormat, variables: rowsToVars(variables),
   }), [meta, query, cache, dims.dateFormat, variables])

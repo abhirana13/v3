@@ -94,6 +94,7 @@ export function ConfigView(p: ConfigViewProps) {
               <ConfigField label="Chart Cache" required hint="Appends (fill-missing): older cached days are skipped, but the last 4 days are always re-pulled so late-arriving data is caught."><ConfigSelect value={p.cache.chartCache} options={p.cacheOptions.chartCache} disabled center /></ConfigField>
               <ConfigField label="Default Backpopulation Days" required><ConfigInput type="number" value={p.cache.backpopDays} onChange={(v) => p.onCacheChange({ backpopDays: v })} /></ConfigField>
               <ConfigField label="Backpopulation Batch Size" required><ConfigInput type="number" value={p.cache.backpopBatch} onChange={(v) => p.onCacheChange({ backpopBatch: v })} /></ConfigField>
+              <ConfigField label="Default Data Recency" hint="The chart opens showing data up to this many days before today (the default for the in-chart recency selector)."><ConfigSelect value={p.cache.dataRecency} onChange={(v) => p.onCacheChange({ dataRecency: v })} options={['0', '1', '2', '3', '7', '14']} center /></ConfigField>
             </div>
           </div>
 

@@ -46,7 +46,7 @@ export interface ChartViewProps {
   toast?: string | null
   metricsTab: string; onMetricsTabChange: (t: string) => void
   settingsMetric: MetricDraft | null; settingsOpen: boolean; settingsError?: string | null
-  onCloseSettings: () => void; onApplySettings: (d: MetricDraft) => void; onSaveSettings: (d: MetricDraft) => void
+  onCloseSettings: () => void; onApplySettings: (d: MetricDraft) => void; onSaveSettings: (d: MetricDraft) => void; onDeleteSettings?: (d: MetricDraft) => void
   loading?: boolean; error?: string | null
   charts: { id: number; name: string; number?: number | null; certified?: boolean }[]; onSelectChart: (id: number) => void
   onGoHome: () => void
@@ -250,7 +250,7 @@ export function ChartView(p: ChartViewProps) {
       <MetricSettingsModal
         open={p.settingsOpen} metric={p.settingsMetric} dimensionNames={p.dimensions.map((d) => d.label)}
         metricNames={p.metrics.filter((m) => !m.formula && m.id !== p.settingsMetric?.id).map((m) => m.name)}
-        error={p.settingsError} onClose={p.onCloseSettings} onApply={p.onApplySettings} onSave={p.onSaveSettings}
+        error={p.settingsError} onClose={p.onCloseSettings} onApply={p.onApplySettings} onSave={p.onSaveSettings} onDelete={p.onDeleteSettings}
       />
 
       <MetricOrderModal open={orderOpen} metrics={p.metrics} onClose={() => setOrderOpen(false)} onSave={(ids) => { p.onReorderMetrics(ids); setOrderOpen(false) }} />

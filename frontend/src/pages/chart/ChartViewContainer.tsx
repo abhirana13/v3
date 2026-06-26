@@ -69,7 +69,10 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
           formula: m.formula || '', independentFields: m.independent_dimensions || [],
           axis: m.y_axis, decimals: m.decimals, unit: m.unit || 'None',
         })))
-        setDateRange({ start: dv.date_min || '', end: todayMinus(endOffset) })
+        // open at the chart's saved default recency (falls back to 2)
+        const off = dm.default_end_offset_days ?? 2
+        setEndOffset(off)
+        setDateRange({ start: dv.date_min || '', end: todayMinus(off) })
       } catch (e: any) {
         if (alive) setError(String(e.message || e))
       }
@@ -241,7 +244,12 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   /* ---- persist dims/metrics config to the backend (PUT replaces all) ---- */
   const buildPayload = (uiMetrics: UIMetric[]) => ({
     time_column: cfg!.time_column,
-    dimensions: cfg!.dimensions.map((d) => ({ name: d.name, column_name: d.column_name })),
+    // Preserve each dimension's saved value_order, and skip backend-derived dims
+    // (e.g. country_tier) — otherwise a metric edit here would reset value ordering
+    // to the default and persist a derived dim as a real one.
+    dimensions: cfg!.dimensions
+      .filter((d) => !d.derived)
+      .map((d) => ({ name: d.name, column_name: d.column_name, value_order: d.value_order })),
     metrics: uiMetrics.map<MetricCfg>((m) => ({
       name: m.name,
       column_name: m.formula ? null : (m.columnName ?? m.name),
@@ -303,6 +311,12 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     }
   }
 
+  // delete a metric (from the settings modal) — drop it and persist the rest
+  const deleteMetric = (draft: MetricDraft) => {
+    const next = metrics.filter((m) => m.id !== draft.id)
+    persist(next).then((ok) => { if (ok) onCloseSettings() })
+  }
+
   return (
     <ChartView
       title={title} chartId={chartId} charts={charts} onSelectChart={onSelectChart}
@@ -324,7 +338,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       metricsTab={metricsTab} onMetricsTabChange={setMetricsTab}
       settingsMetric={settingsMetric} settingsOpen={settingsMetric != null} settingsError={settingsError}
       onCloseSettings={onCloseSettings}
-      onApplySettings={(d) => applyDraft(d, false)} onSaveSettings={(d) => applyDraft(d, true)}
+      onApplySettings={(d) => applyDraft(d, false)} onSaveSettings={(d) => applyDraft(d, true)} onDeleteSettings={deleteMetric}
       loading={loading} error={error}
     />
   )

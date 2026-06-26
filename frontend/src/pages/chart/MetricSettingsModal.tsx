@@ -7,14 +7,16 @@ export interface MetricDraft {
   id: string; name: string; formula?: string; independentFields?: string[]
   axis?: 'primary' | 'secondary'; decimals?: number; unit?: string; isNew?: boolean
 }
-export function MetricSettingsModal({ open, metric, dimensionNames, metricNames, error, onClose, onApply, onSave }: {
+export function MetricSettingsModal({ open, metric, dimensionNames, metricNames, error, onClose, onApply, onSave, onDelete }: {
   open: boolean; metric: MetricDraft | null; dimensionNames: string[]; metricNames: string[]; error?: string | null
   onClose: () => void; onApply: (d: MetricDraft) => void; onSave: (d: MetricDraft) => void
+  onDelete?: (d: MetricDraft) => void
 }) {
   const [draft, setDraft] = useState<MetricDraft>(metric || ({} as MetricDraft))
   const [indOpen, setIndOpen] = useState(false)
   const [formulaValid, setFormulaValid] = useState(true)
-  useEffect(() => { setDraft(metric || ({} as MetricDraft)) }, [metric, open])
+  const [confirmDel, setConfirmDel] = useState(false)
+  useEffect(() => { setDraft(metric || ({} as MetricDraft)); setConfirmDel(false) }, [metric, open])
   if (!open || !metric) return null
 
   const set = (k: keyof MetricDraft, v: any) => setDraft((d) => ({ ...d, [k]: v }))
@@ -100,10 +102,22 @@ export function MetricSettingsModal({ open, metric, dimensionNames, metricNames,
           </div>
           {error && <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-600">{error}</div>}
         </div>
-        <div className="flex items-center justify-end gap-2.5 border-t border-slate-100 bg-slate-50 px-5 py-3.5">
-          {!formulaValid && <span className="mr-auto text-[12px] font-medium text-rose-500">Formula is incomplete</span>}
-          {!metric.isNew && <button onClick={() => onApply(draft)} disabled={!formulaValid} className="rounded-md border border-slate-200 bg-white px-4 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40">Apply changes</button>}
-          <button onClick={() => onSave(draft)} disabled={!formulaValid} className="rounded-md bg-sky-500 px-4 py-2 text-[13px] font-semibold text-white shadow-sm hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">Save changes</button>
+        <div className="flex items-center gap-2.5 border-t border-slate-100 bg-slate-50 px-5 py-3.5">
+          {/* delete (existing metrics only) — two-click confirm to avoid accidents */}
+          {!metric.isNew && onDelete && (confirmDel ? (
+            <span className="flex items-center gap-2 text-[12px]">
+              <span className="text-slate-500">Delete this metric?</span>
+              <button onClick={() => onDelete(draft)} className="rounded-md bg-rose-600 px-2.5 py-1.5 text-[12px] font-semibold text-white hover:bg-rose-700">Yes, delete</button>
+              <button onClick={() => setConfirmDel(false)} className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[12px] text-slate-600 hover:bg-slate-50">Cancel</button>
+            </span>
+          ) : (
+            <button onClick={() => setConfirmDel(true)} className="rounded-md border border-rose-200 bg-white px-3 py-2 text-[13px] font-medium text-rose-600 hover:bg-rose-50">Delete metric</button>
+          ))}
+          <div className="ml-auto flex items-center gap-2.5">
+            {!formulaValid && <span className="text-[12px] font-medium text-rose-500">Formula is incomplete</span>}
+            {!metric.isNew && <button onClick={() => onApply(draft)} disabled={!formulaValid} className="rounded-md border border-slate-200 bg-white px-4 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40">Apply changes</button>}
+            <button onClick={() => onSave(draft)} disabled={!formulaValid} className="rounded-md bg-sky-500 px-4 py-2 text-[13px] font-semibold text-white shadow-sm hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50">Save changes</button>
+          </div>
         </div>
       </div>
     </div>

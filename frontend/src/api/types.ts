@@ -20,6 +20,7 @@ export interface ChartFull {
   default_backpop_days: number
   backpop_batch_size: number
   default_date_range_days: number
+  default_end_offset_days: number
   cur_date_behavior: string
   cache_strategy: string
   time_column: string | null
@@ -48,6 +49,7 @@ export interface ChartWriteBody {
   default_backpop_days?: number
   backpop_batch_size?: number
   default_date_range_days?: number
+  default_end_offset_days?: number
   cur_date_behavior?: string
   cache_strategy?: string
   time_column?: string | null
@@ -78,6 +80,7 @@ export interface MetricCfg {
 export interface DimsMetrics {
   time_column: string | null
   date_format: string | null
+  default_end_offset_days?: number
   dimensions: DimensionCfg[]
   metrics: MetricCfg[]
 }
