@@ -10,6 +10,28 @@ const GRAN: Record<string, string> = { Day: 'day', Week: 'week', Month: 'month' 
 const SERIES_CAP = 20 // max series when splitting (per-dimension AND cross-dimension)
 const todayMinus = (n: number) => { const d = new Date(); d.setDate(d.getDate() - n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
 const stripBrackets = (f: string) => f.replace(/[[\]]/g, '').trim()
+const isoOf = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+// All bucket-start dates in [startISO, endISO] at the given granularity, matching the
+// backend's date_trunc (week => Monday, month => 1st). Lets the x-axis span the SELECTED
+// window even where there's no data (gaps, no line) instead of cropping to the data extent.
+const dateBuckets = (startISO: string, endISO: string, gran: string): string[] => {
+  if (!startISO || !endISO) return []
+  const s = new Date(startISO + 'T00:00:00'), e = new Date(endISO + 'T00:00:00')
+  if (isNaN(s.getTime()) || isNaN(e.getTime()) || s > e) return []
+  const out: string[] = []
+  if (gran === 'month') {
+    const cur = new Date(s.getFullYear(), s.getMonth(), 1), last = new Date(e.getFullYear(), e.getMonth(), 1)
+    while (cur <= last) { out.push(isoOf(cur)); cur.setMonth(cur.getMonth() + 1) }
+  } else if (gran === 'week') {
+    const monday = (d: Date) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x }
+    const cur = monday(s), last = monday(e)
+    while (cur <= last) { out.push(isoOf(cur)); cur.setDate(cur.getDate() + 7) }
+  } else {
+    const cur = new Date(s)
+    while (cur <= e) { out.push(isoOf(cur)); cur.setDate(cur.getDate() + 1) }
+  }
+  return out
+}
 
 export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, onEditChart, onCreateChart }: {
   chartId: number
@@ -72,7 +94,9 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         // open at the chart's saved default recency (falls back to 2)
         const off = dm.default_end_offset_days ?? 2
         setEndOffset(off)
-        setDateRange({ start: dv.date_min || '', end: todayMinus(off) })
+        // window end = today; the recency offset caps it (recencyEnd) so the offset, not
+        // a stale end, controls how recent the data is
+        setDateRange({ start: dv.date_min || '', end: todayMinus(0) })
       } catch (e: any) {
         if (alive) setError(String(e.message || e))
       }
@@ -104,6 +128,13 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     () => dimensions.filter((d) => d.split).map((d) => `${d.key}:${d.selected.length}/${d.values.length}`).join('|'),
     [dimensions],
   )
+  // The recency offset is a hard cap on how recent data can be (today − offset). The
+  // effective window end = min(picked end, cap), so changing the date can't load past
+  // it. This is what's fetched, drawn, and shown in the date picker.
+  const recencyEnd = useMemo(() => {
+    const cap = todayMinus(endOffset)
+    return dateRange.end && dateRange.end < cap ? dateRange.end : cap
+  }, [dateRange.end, endOffset])
 
   /* ---- fetch data whenever the query inputs change ---- */
   useEffect(() => {
@@ -140,18 +171,24 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     const token = ++fetchToken.current
     setLoading(true); setError(null)
     api.getData(chartId, {
-      granularity: GRAN[granularity], from: dateRange.start || null, to: dateRange.end || null,
+      granularity: GRAN[granularity], from: dateRange.start || null, to: recencyEnd || null,
       metrics: names, groupBy, filters, hideZero,
     }).then((resp) => {
       if (token !== fetchToken.current) return
       const tc = cfg.time_column as string
+      // full bucket series for the selected window, so the x-axis honors the chosen
+      // start/end with gaps where there's no data (falls back to data rows if unset)
+      const buckets = dateBuckets(dateRange.start, recencyEnd, GRAN[granularity])
 
       if (splitDims.length === 0) {
         // time-only aggregate: one series per visible metric (unchanged behavior)
         setChartSeries(visibleMetrics.map((m) => ({ key: m.key, label: m.name, color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name })))
-        setChartData(resp.rows.map((r) => {
-          const row: ChartRow = { date: r[tc] as string }
-          for (const n of names) row[n] = r[n] ?? null
+        const byT = new Map(resp.rows.map((r) => [String(r[tc]), r]))
+        const dates = buckets.length ? buckets : resp.rows.map((r) => String(r[tc]))
+        setChartData(dates.map((d) => {
+          const r = byT.get(d)
+          const row: ChartRow = { date: d }
+          for (const n of names) row[n] = r ? (r[n] ?? null) : null
           return row
         }))
         setLoading(false)
@@ -178,6 +215,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       setChartSeries(series)
 
       const byDate = new Map<string, ChartRow>()
+      for (const d of buckets) byDate.set(d, { date: d }) // seed the full window (gaps where no data)
       for (const r of resp.rows) {
         const date = String(r[tc]); const combo = comboOf(r)
         let row = byDate.get(date)
@@ -190,7 +228,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       if (token !== fetchToken.current) return
       setError(String(e.message || e)); setLoading(false)
     })
-  }, [cfg, chartId, visibleMetrics, granularity, dateRange, filters, hideZero, splitKey, dataReloadKey])
+  }, [cfg, chartId, visibleMetrics, granularity, dateRange.start, recencyEnd, filters, hideZero, splitKey, dataReloadKey])
 
   /* ---- dimension callbacks ---- */
   const onDimensionToggleValue = useCallback((key: string, val: string) => {
@@ -227,11 +265,10 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     }
   }, [chartId])
 
-  /* ---- data recency offset: chart data ends `endOffset` days before today ---- */
-  const onEndOffsetChange = useCallback((n: number) => {
-    setEndOffset(n)
-    setDateRange((r) => ({ ...r, end: todayMinus(n) }))
-  }, [])
+  /* ---- data recency offset: caps how recent data can be (today − offset). Just sets
+     the offset; recencyEnd derives the effective end, so it can't be clobbered by the
+     date picker (and lowering the offset re-extends toward today). ---- */
+  const onEndOffsetChange = useCallback((n: number) => setEndOffset(n), [])
 
   /* ---- share: copy a link that reopens this chart ---- */
   const onShare = useCallback(async () => {
@@ -323,7 +360,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       onGoHome={onGoHome} onEditChart={onEditChart} onCreateChart={onCreateChart} freshness={freshness}
       chartType={chartType} onChartTypeChange={setChartType}
       granularity={granularity} onGranularityChange={setGranularity}
-      dateRange={dateRange} onDateRangeChange={(s, e) => setDateRange({ start: s, end: e })}
+      dateRange={{ start: dateRange.start, end: recencyEnd }} onDateRangeChange={(s, e) => setDateRange({ start: s, end: e })}
       dimensions={dimensions} allToggle={allToggle}
       onDimensionToggleValue={onDimensionToggleValue} onDimensionSetAll={onDimensionSetAll}
       onDimensionToggleSplit={onDimensionToggleSplit} splitNotice={splitNotice}

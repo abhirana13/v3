@@ -17,7 +17,7 @@ import { ChartToolsRail } from './ChartToolsRail'
 import { DataTablePanel } from './DataTablePanel'
 import { applyMovingAverage, applyPercentage, buildCategorical } from './transforms'
 
-const DEFAULT_CHART_OPTIONS: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: false, logScale: false }
+const DEFAULT_CHART_OPTIONS: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: true, logScale: false }
 
 // Legend hide is keyed by the cut (comboLabel) when split — so hiding a cut applies
 // to every metric and survives switching metrics — otherwise by the metric's own key.

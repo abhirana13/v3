@@ -45,6 +45,7 @@ function MonthGrid({ month, rangeStart, rangeEnd, hover, onPick, onHover }: {
   for (let d = 1; d <= daysIn; d++) cells.push(new Date(month.getFullYear(), month.getMonth(), d))
 
   const previewEnd = rangeStart && !rangeEnd && hover ? hover : rangeEnd
+  const today = stripTime(new Date())
   const inRange = (day: Date) => {
     if (!rangeStart || !previewEnd) return false
     const a = stripTime(rangeStart).getTime(), b = stripTime(previewEnd).getTime(), t = stripTime(day).getTime()
@@ -61,12 +62,14 @@ function MonthGrid({ month, rangeStart, rangeEnd, hover, onPick, onHover }: {
           if (!day) return <div key={i} />
           const isEdge = sameDay(day, rangeStart) || sameDay(day, previewEnd)
           const mid = inRange(day)
+          const isToday = sameDay(day, today)
           return (
             <div key={i} className={'flex justify-center ' + (mid || (isEdge && rangeStart && previewEnd) ? 'bg-sky-50' : '')}>
               <button
                 onClick={() => onPick(day)}
                 onMouseEnter={() => onHover(day)}
-                className={'flex h-8 w-8 items-center justify-center rounded-full text-[12.5px] transition-colors ' + (isEdge ? 'bg-sky-500 font-semibold text-white' : mid ? 'text-sky-700' : 'text-slate-600 hover:bg-slate-100')}
+                title={isToday ? 'Today' : undefined}
+                className={'flex h-8 w-8 items-center justify-center rounded-full text-[12.5px] transition-colors ' + (isEdge ? 'bg-sky-500 font-semibold text-white' : mid ? 'text-sky-700' : 'text-slate-600 hover:bg-slate-100') + (isToday && !isEdge ? ' ring-1 ring-sky-300' : '')}
               >
                 {day.getDate()}
               </button>

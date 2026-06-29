@@ -5,11 +5,17 @@ import { HoverCard } from './HoverCard'
 import type { HoverRow } from './HoverCard'
 import type { ChartOptions } from '../components/types'
 
-const DEFAULT_DISPLAY: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: false, logScale: false }
+const DEFAULT_DISPLAY: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: true, logScale: false }
 
 /* ECharts line/area/bar time series with primary/secondary Y axes. The built-in
    tooltip content is disabled (axisPointer crosshair only); a React HoverCard
-   shows per-series value + DoD/WoW deltas, positioned beside the cursor. */
+   shows per-series value + DoD/WoW deltas, positioned beside the cursor.
+
+   Box-zoom: a "Box zoom" button arms a transparent capture overlay laid over the chart.
+   While armed, the overlay (not ECharts, not the canvas) owns the drag — so nothing competes
+   for the mousedown — draws the selection box, and on release maps the pixel box to data via
+   convertFromPixel and applies it with dispatchAction on explicit `inside` dataZoom components
+   (this exact path is verified to zoom x + the value axis, even with a zero-based y-axis). */
 
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const fmtDate = (iso: string) => {
@@ -40,7 +46,10 @@ const DELTA: Record<string, { short: { label: string; months?: number; days?: nu
   month: { short: { label: 'MoM', months: 1 }, long: { label: 'YoY', months: 12 } },
 }
 
+const clampN = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v))
+
 type Hover = { x: number; y: number; rectLeft: number; rectTop: number; index: number }
+type Drag = { x0: number; y0: number; x1: number; y1: number }
 
 export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, seriesType = 'line', percentStacked = false, granularity = 'Day', display, categorical = false, pngRef }: {
   data: ChartRow[]
@@ -56,10 +65,24 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
 }) {
   const d = display ?? DEFAULT_DISPLAY
   const elRef = useRef<HTMLDivElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<echarts.ECharts | null>(null)
   const cardRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<Drag | null>(null) // live box-zoom drag (mutated by window listeners)
   const [hover, setHover] = useState<Hover | null>(null)
   const [cardPos, setCardPos] = useState({ left: 0, top: 0 })
+  const [zoomed, setZoomed] = useState(false) // box-zoomed in (shows the Zoom-out button)
+  const [zoomArmed, setZoomArmed] = useState(false) // "Box zoom" button toggled on → overlay active
+  const [sel, setSel] = useState<Drag | null>(null) // selection rectangle being drawn
+
+  const hasSecondary = !percentStacked && series.some((s) => s.axis === 'secondary')
+  // dynamic (non-zero-based) y-axis: pad above & below so the line never sits flush on the
+  // floor/ceiling. Zero-base (default) uses scale:false; a value-axis dataZoom still zooms a
+  // band even with scale:false (verified headless), so zero-base and box-zoom coexist.
+  const dynY = !percentStacked && !d.logScale && !d.zeroBase
+  const yPad: [string, string] = ['20%', '20%']
+
+  const armZoom = (on: boolean) => { setZoomArmed(on); setSel(null); if (on) setHover(null) }
 
   useEffect(() => {
     if (!pngRef) return
@@ -76,22 +99,17 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
     const raf = requestAnimationFrame(() => chart.resize())
     const t = setTimeout(() => chart.resize(), 120)
 
-    // custom hover card: track the hovered index + cursor position; rows are
-    // derived (below) from the latest data/series so this stays non-stale.
-    const zr = chart.getZr()
-    const onMove = (e: { offsetX: number; offsetY: number }) => {
-      if (!chart.containPixel('grid', [e.offsetX, e.offsetY])) { setHover(null); return }
-      const idx = Math.round(chart.convertFromPixel({ xAxisIndex: 0 }, e.offsetX) as number)
-      const rect = elRef.current!.getBoundingClientRect()
-      setHover({ x: e.offsetX, y: e.offsetY, rectLeft: rect.left, rectTop: rect.top, index: idx })
+    // reflect box-zoom state so the "Zoom out" button shows only when zoomed in.
+    // NOTE: the ECharts event is 'datazoom' (lowercase) — 'dataZoom' never fires.
+    const onZoom = () => {
+      const dz = ((chart.getOption() as any)?.dataZoom || []) as Array<{ start?: number; end?: number }>
+      setZoomed(dz.some((z) => (z.start ?? 0) > 0.2 || (z.end ?? 100) < 99.8))
     }
-    const onOut = () => setHover(null)
-    zr.on('mousemove', onMove)
-    zr.on('globalout', onOut)
+    chart.on('datazoom', onZoom)
 
     return () => {
       cancelAnimationFrame(raf); clearTimeout(t); ro.disconnect()
-      zr.off('mousemove', onMove); zr.off('globalout', onOut); chart.dispose()
+      chart.off('datazoom', onZoom); chart.dispose()
     }
   }, [])
 
@@ -121,11 +139,6 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
       const s = v.toFixed(axisDec)
       return axisDec >= 2 ? s : s.replace(/\.0$/, '') // keep 0.90 vs 1.00 distinct; tidy whole steps elsewhere
     }
-    const hasSecondary = !percentStacked && series.some((s) => s.axis === 'secondary')
-    // dynamic (non-zero-based) y-axis: pad above & below the data so the line never
-    // sits flush on the floor/ceiling — a min value glued to the axis reads as "0".
-    const dynY = !percentStacked && !d.logScale && !d.zeroBase
-    const yPad: [string, string] = ['20%', '20%']
 
     const echartSeries = series.map((s) => ({
       name: s.label,
@@ -148,6 +161,15 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
       animationDuration: 350,
       color: series.map((s) => s.color),
       grid: { left: 56, right: hasSecondary ? 60 : 24, top: 18, bottom: 56 },
+      // explicit `inside` dataZoom components are the zoom TARGETS — the capture overlay writes
+      // ranges to them via dispatchAction. Wheel/drag-pan are off, so they do nothing on their
+      // own; at full range (0–100) they're a no-op, so zero-base still holds. Index order is
+      // fixed: 0 = x, 1 = y-primary (omitted when percentStacked), then secondary.
+      dataZoom: [
+        { type: 'inside', xAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: false, moveOnMouseMove: false, moveOnMouseWheel: false },
+        ...(percentStacked ? [] : [{ type: 'inside', yAxisIndex: 0, filterMode: 'none', zoomOnMouseWheel: false, moveOnMouseMove: false, moveOnMouseWheel: false }]),
+        ...(hasSecondary ? [{ type: 'inside', yAxisIndex: 1, filterMode: 'none', zoomOnMouseWheel: false, moveOnMouseMove: false, moveOnMouseWheel: false }] : []),
+      ],
       // time mode: content disabled (React HoverCard renders it); categorical: built-in tooltip
       tooltip: categorical
         ? {
@@ -187,7 +209,9 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
           axisLine: { show: false }, axisTick: { show: false },
           splitLine: { show: d.gridlines, lineStyle: { color: '#f1f5f9' } },
           axisLabel: { color: '#94a3b8', fontSize: 11, formatter: percentStacked ? (v: number) => `${v}%` : (v: number) => compact(v) },
-          min: percentStacked ? 0 : (d.logScale ? undefined : (d.zeroBase ? 0 : undefined)),
+          // zero-baseline comes from scale:false (when zeroBase on); a box-zoom still zooms a band.
+          // dynY (auto-fit) uses scale:true + padding.
+          min: percentStacked ? 0 : undefined,
           max: percentStacked ? 100 : undefined,
           scale: dynY,
           boundaryGap: dynY ? yPad : undefined,
@@ -207,6 +231,7 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
       series: echartSeries,
     }, true)
     chart.resize()
+    setZoomed(false) // a fresh (notMerge) render resets the dataZoom to the full extent
   }, [data, series, xLabel, yLabelPrimary, seriesType, percentStacked, display, categorical])
 
   const gran = (granularity || 'day').toLowerCase()
@@ -279,9 +304,111 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
     setCardPos({ left, top })
   }, [hover, hoverRows])
 
+  /* ---------------------------------------------------------------- box-zoom */
+  // window-level move/up so the drag keeps tracking even if the cursor leaves the overlay.
+  function onWinMove(e: MouseEvent) {
+    const drag = dragRef.current, el = wrapRef.current
+    if (!drag || !el) return
+    const r = el.getBoundingClientRect()
+    drag.x1 = clampN(e.clientX - r.left, 0, r.width)
+    drag.y1 = clampN(e.clientY - r.top, 0, r.height)
+    setSel({ x0: drag.x0, y0: drag.y0, x1: drag.x1, y1: drag.y1 })
+  }
+  function onWinUp() {
+    const chart = chartRef.current, drag = dragRef.current
+    if (chart && drag) {
+      const x0 = Math.min(drag.x0, drag.x1), x1 = Math.max(drag.x0, drag.x1)
+      const y0 = Math.min(drag.y0, drag.y1), y1 = Math.max(drag.y0, drag.y1)
+      // zoom whichever axis was actually dragged (a wide-flat box zooms only the dates, etc.)
+      const wideX = x1 - x0 >= 6, tallY = y1 - y0 >= 6
+      if (wideX || tallY) {
+        const n = data.length
+        const ia = clampN(Math.round(chart.convertFromPixel({ xAxisIndex: 0 }, x0) as number), 0, n - 1)
+        const ib = clampN(Math.round(chart.convertFromPixel({ xAxisIndex: 0 }, x1) as number), 0, n - 1)
+        const yA = percentStacked ? 0 : (chart.convertFromPixel({ yAxisIndex: 0 }, y0) as number)
+        const yB = percentStacked ? 0 : (chart.convertFromPixel({ yAxisIndex: 0 }, y1) as number)
+        const s2A = hasSecondary ? (chart.convertFromPixel({ yAxisIndex: 1 }, y0) as number) : 0
+        const s2B = hasSecondary ? (chart.convertFromPixel({ yAxisIndex: 1 }, y1) as number) : 0
+        if (wideX) chart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: Math.min(ia, ib), endValue: Math.max(ia, ib) } as any)
+        if (tallY && !percentStacked && isFinite(yA) && isFinite(yB)) chart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, startValue: Math.min(yA, yB), endValue: Math.max(yA, yB) } as any)
+        if (tallY && hasSecondary && isFinite(s2A) && isFinite(s2B)) chart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 2, startValue: Math.min(s2A, s2B), endValue: Math.max(s2A, s2B) } as any)
+        setZoomed(true)
+      }
+    }
+    dragRef.current = null
+    setSel(null)
+    window.removeEventListener('mousemove', onWinMove)
+    window.removeEventListener('mouseup', onWinUp)
+  }
+  // mousedown on the (top-most) capture overlay — nothing else competes for it
+  const onOverlayDown = (e: React.MouseEvent) => {
+    const el = wrapRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const x = clampN(e.clientX - r.left, 0, r.width), y = clampN(e.clientY - r.top, 0, r.height)
+    dragRef.current = { x0: x, y0: y, x1: x, y1: y }
+    window.addEventListener('mousemove', onWinMove)
+    window.addEventListener('mouseup', onWinUp)
+    e.preventDefault()
+  }
+
+  // reset the box-zoom back to the full view (no dataZoomIndex → every dataZoom → 0..100)
+  const resetZoom = () => {
+    chartRef.current?.dispatchAction({ type: 'dataZoom', start: 0, end: 100 } as any)
+    setZoomed(false)
+  }
+
+  // hover card (time mode): driven by the wrapper's own mouse move. Disabled while box-zoom is
+  // armed (the capture overlay sits on top and owns the pointer then).
+  const onHoverMove = (e: React.MouseEvent) => {
+    if (zoomArmed || categorical) return
+    const chart = chartRef.current, el = wrapRef.current
+    if (!chart || !el) return
+    const r = el.getBoundingClientRect()
+    const ox = e.clientX - r.left, oy = e.clientY - r.top
+    if (!chart.containPixel('grid', [ox, oy])) { setHover(null); return }
+    const idx = Math.round(chart.convertFromPixel({ xAxisIndex: 0 }, ox) as number)
+    setHover({ x: ox, y: oy, rectLeft: r.left, rectTop: r.top, index: idx })
+  }
+  const onHoverLeave = () => setHover(null)
+
+  const selRect = sel
+    ? { left: Math.min(sel.x0, sel.x1), top: Math.min(sel.y0, sel.y1), width: Math.abs(sel.x1 - sel.x0), height: Math.abs(sel.y1 - sel.y0) }
+    : null
+
   return (
     <>
-      <div ref={elRef} className="h-full w-full" />
+      <div ref={wrapRef} className="relative h-full w-full" onMouseMove={onHoverMove} onMouseLeave={onHoverLeave}>
+        <div ref={elRef} className="h-full w-full" />
+
+        {/* capture overlay: only present while armed, sits on top so the drag never competes
+            with the canvas for the mousedown */}
+        {zoomArmed && !categorical && (
+          <div className="absolute inset-0 z-20" style={{ cursor: 'crosshair' }} onMouseDown={onOverlayDown}>
+            {selRect && (
+              <div className="pointer-events-none absolute border" style={{ left: selRect.left, top: selRect.top, width: selRect.width, height: selRect.height, background: 'rgba(14,165,233,0.10)', borderColor: '#0ea5e9' }} />
+            )}
+          </div>
+        )}
+
+        {!categorical && (
+          <div className="absolute right-2 top-2 z-30 flex items-center gap-1.5">
+            <button onClick={() => armZoom(!zoomArmed)}
+              title={zoomArmed ? 'Box-zoom on — drag a region on the chart, or click to turn off' : 'Turn on box-zoom, then drag a region on the chart'}
+              className={'flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] font-medium shadow-sm transition-colors ' + (zoomArmed ? 'border-sky-500 bg-sky-500 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-sky-300 hover:text-sky-600')}>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+              {zoomArmed ? 'Drag to zoom' : 'Box zoom'}
+            </button>
+            {zoomed && (
+              <button onClick={resetZoom} title="Reset to the full range"
+                className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[12px] font-medium text-slate-600 shadow-sm transition-colors hover:border-sky-300 hover:text-sky-600">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3M8 11h6" /></svg>
+                Zoom out
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       {!categorical && hover && hoverRows.length > 0 && (
         <div ref={cardRef} style={{ position: 'fixed', left: cardPos.left, top: cardPos.top, zIndex: 50, pointerEvents: 'none' }}>
           <HoverCard title={title} rows={hoverRows} shortLabel={dcfg.short.label} longLabel={dcfg.long.label} total={hoverTotal} />
