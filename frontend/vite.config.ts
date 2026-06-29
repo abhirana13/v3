@@ -8,6 +8,15 @@ const target = process.env.VITE_API_TARGET || 'http://backend:8000'
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        // keep ECharts (the one heavy dep) in its own chunk: it loads on-demand with
+        // the chart view and stays cached across deploys when only app code changes
+        manualChunks: { echarts: ['echarts'] },
+      },
+    },
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,

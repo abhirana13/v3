@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import { api } from './api/client'
 import type { ChartSummary } from './api/types'
-import { ChartViewContainer } from './pages/chart/ChartViewContainer'
-import { ConfigContainer } from './pages/config/ConfigContainer'
-import { HomePage } from './pages/home/HomePage'
+
+// Route-level code splitting: each view is its own async chunk so the heavy one
+// (ChartViewContainer pulls in ECharts) only downloads when that view is opened,
+// not on the initial home/list landing. Named exports → unwrap to { default }.
+const ChartViewContainer = lazy(() => import('./pages/chart/ChartViewContainer').then((m) => ({ default: m.ChartViewContainer })))
+const ConfigContainer = lazy(() => import('./pages/config/ConfigContainer').then((m) => ({ default: m.ConfigContainer })))
+const HomePage = lazy(() => import('./pages/home/HomePage').then((m) => ({ default: m.HomePage })))
 
 type View = { name: 'home' } | { name: 'chart' } | { name: 'config'; target: number | 'new' }
 
@@ -44,12 +48,13 @@ export function App() {
 
   if (error) return <Centered>Failed to load: {error}</Centered>
 
+  // Resolve the current view to an element, then render it under one Suspense
+  // boundary so a lazy view's chunk shows the same "Loading…" fallback while it loads.
+  let body: React.ReactNode
   if (view.name === 'home') {
-    return <HomePage onOpenChart={(id) => { setChartId(id); setView({ name: 'chart' }) }} />
-  }
-
-  if (view.name === 'config') {
-    return (
+    body = <HomePage onOpenChart={(id) => { setChartId(id); setView({ name: 'chart' }) }} />
+  } else if (view.name === 'config') {
+    body = (
       <ConfigContainer
         target={view.target}
         charts={charts || []}
@@ -69,11 +74,10 @@ export function App() {
         }}
       />
     )
-  }
-
-  if (!charts) return <Centered>Loading…</Centered>
-  if (charts.length === 0) {
-    return (
+  } else if (!charts) {
+    body = <Centered>Loading…</Centered>
+  } else if (charts.length === 0) {
+    body = (
       <Centered>
         <div className="text-center">
           <p className="mb-3">No charts yet.</p>
@@ -81,19 +85,22 @@ export function App() {
         </div>
       </Centered>
     )
+  } else if (chartId == null) {
+    body = <Centered>Select a chart.</Centered>
+  } else {
+    body = (
+      <ChartViewContainer
+        chartId={chartId}
+        charts={charts.map((c) => ({ id: c.id, name: c.name, number: c.chart_number, certified: c.certified }))}
+        onSelectChart={setChartId}
+        onGoHome={() => setView({ name: 'home' })}
+        onEditChart={(id) => window.open(`${window.location.pathname}?config=${id}`, '_blank')}
+        onCreateChart={() => window.open(`${window.location.pathname}?config=new`, '_blank')}
+      />
+    )
   }
-  if (chartId == null) return <Centered>Select a chart.</Centered>
 
-  return (
-    <ChartViewContainer
-      chartId={chartId}
-      charts={charts.map((c) => ({ id: c.id, name: c.name, number: c.chart_number, certified: c.certified }))}
-      onSelectChart={setChartId}
-      onGoHome={() => setView({ name: 'home' })}
-      onEditChart={(id) => window.open(`${window.location.pathname}?config=${id}`, '_blank')}
-      onCreateChart={() => window.open(`${window.location.pathname}?config=new`, '_blank')}
-    />
-  )
+  return <Suspense fallback={<Centered>Loading…</Centered>}>{body}</Suspense>
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
