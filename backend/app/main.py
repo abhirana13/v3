@@ -15,6 +15,7 @@ from app.db import ensure_schema
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_schema(postgres_conn.engine)
+    duckdb_conn.ensure_database()  # so read_only serving connections can always open it
     yield
 
 

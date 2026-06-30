@@ -82,6 +82,22 @@ def ensure_schema(eng=None) -> None:
                         "ADD COLUMN value_order VARCHAR NOT NULL DEFAULT 'natural'"
                     )
                 )
+        if "backpop_runs" in inspector.get_table_names():
+            br_cols = {c["name"] for c in inspector.get_columns("backpop_runs")}
+            if "force" not in br_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE backpop_runs "
+                        "ADD COLUMN force BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+            if "cancel_requested" not in br_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE backpop_runs "
+                        "ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
 
     # Seed cache_query_hash for charts that don't have one yet, treating an existing
     # cache as built from the current query. This lets a *future* query edit be detected

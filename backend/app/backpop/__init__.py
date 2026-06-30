@@ -110,15 +110,13 @@ def reap_stale_runs(db: Session, max_age_minutes: int = 120) -> int:
     return reaped
 
 
-# Run ids the user asked to cancel. A manual backpop runs synchronously in this
-# (backend) process; the cancel request is handled concurrently on another worker
-# thread and just adds the id here. The batch loop checks it between batches and
-# stops — keeping whatever it already wrote (each batch is committed atomically).
-_cancel_requested: set[int] = set()
-
-
-def request_cancel(run_id: int) -> None:
-    _cancel_requested.add(run_id)
+def request_cancel(db: Session, run_id: int) -> None:
+    """Flag a run for cancellation. The flag lives in the DB (not an in-process set) so it
+    reaches a run executing in a *different* process — manual runs now execute in the worker,
+    and prod serves the API from multiple uvicorn workers. The batch loop re-reads the flag
+    between batches and stops, keeping whatever it already wrote (each batch is committed)."""
+    db.query(BackpopRun).filter(BackpopRun.id == run_id).update({"cancel_requested": True})
+    db.commit()
 
 
 def _create_run(
@@ -127,9 +125,12 @@ def _create_run(
     from_date: date | None = None,
     to_date: date | None = None,
     batch_size: int | None = None,
+    status: str = "running",
+    force: bool = False,
 ) -> BackpopRun:
-    """Create + commit a 'running' BackpopRun (so it's visible to the history at
-    once) with the resolved range/batch size. Raises if the chart is missing."""
+    """Create + commit a BackpopRun (so it's visible to the history at once) with the
+    resolved range/batch size. ``status='queued'`` enqueues it for the worker to execute;
+    ``'running'`` is for a run executed inline (nightly/tests). Raises if chart is missing."""
     chart = db.get(Chart, chart_id)
     if chart is None:
         raise ValueError(f"chart {chart_id} not found")
@@ -143,12 +144,69 @@ def _create_run(
         batch_size = chart.backpop_batch_size
     run = BackpopRun(
         chart_id=chart_id, from_date=from_date, to_date=to_date,
-        batch_size=batch_size, status="running",
+        batch_size=batch_size, status=status, force=force,
     )
     db.add(run)
     db.commit()
     db.refresh(run)
     return run
+
+
+def enqueue_run(
+    db: Session,
+    chart_id: int,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    batch_size: int | None = None,
+    force: bool = False,
+) -> BackpopRun:
+    """Queue a manual backpop for the worker to execute, returning the 'queued' run at
+    once (so the HTTP request doesn't block on the work — fixes the long-backfill timeout).
+    The caller polls the run; ``drain_backpop_queue`` (worker) executes it."""
+    return _create_run(
+        db, chart_id, from_date, to_date, batch_size, status="queued", force=force
+    )
+
+
+def claim_next_queued(db: Session) -> BackpopRun | None:
+    """Atomically claim the oldest queued run (queued -> running) and return it, or None if
+    the queue is empty. ``started_at`` is stamped at claim time so the stale-reaper measures
+    from actual start, not enqueue time. FOR UPDATE SKIP LOCKED is a no-op on SQLite (tests)."""
+    run = (
+        db.query(BackpopRun)
+        .filter(BackpopRun.status == "queued")
+        .order_by(BackpopRun.id)
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+    if run is None:
+        return None
+    run.status = "running"
+    run.started_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def drain_backpop_queue(db: Session) -> int:
+    """Claim + execute queued runs one at a time until the queue is empty; returns the count
+    processed. One drainer => DuckDB writes are serialized and never contend with each other.
+    Used by the worker's poll job (and by tests, which call it inline after enqueuing)."""
+    processed = 0
+    while True:
+        run = claim_next_queued(db)
+        if run is None:
+            break
+        chart = db.get(Chart, run.chart_id)
+        if chart is None:
+            run.status = "failed"
+            run.error_message = "chart was deleted before the run started"
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            continue
+        _run_batches(db, run, chart, force=run.force)
+        processed += 1
+    return processed
 
 
 def _run_batches(
@@ -175,7 +233,9 @@ def _run_batches(
     cancelled = False
     try:
         for batch in batches:
-            if run.id in _cancel_requested:
+            # cancel flag is set by the API (another process); re-read committed state —
+            # after the prior batch's commit this is a fresh SELECT, so it sees the flag
+            if db.query(BackpopRun.cancel_requested).filter(BackpopRun.id == run.id).scalar():
                 cancelled = True
                 break
             sql = substitute(chart.query, static_vars, batch)
@@ -216,7 +276,6 @@ def _run_batches(
         run.completed_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(run)
-        _cancel_requested.discard(run.id)
     return run
 
 

@@ -119,10 +119,15 @@ class BackpopRun(Base):
     from_date = Column(Date, nullable=False)
     to_date = Column(Date, nullable=False)
     batch_size = Column(Integer, nullable=False)
-    status = Column(String(16), nullable=False, default="running")  # running|success|failed
+    status = Column(String(16), nullable=False, default="running")  # queued|running|success|failed|cancelled
     row_count = Column(Integer, nullable=False, default=0)
     batches_completed = Column(Integer, nullable=False, default=0)
     error_message = Column(Text, nullable=True)
+    # force re-pull is persisted so a queued run carries it to the worker that executes it
+    force = Column(Boolean, nullable=False, default=False, server_default="false")
+    # cancel signal lives in the DB (not an in-process set) so it reaches a run executing
+    # in another process — prod runs multiple uvicorn workers + a separate worker process
+    cancel_requested = Column(Boolean, nullable=False, default=False, server_default="false")
     started_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 

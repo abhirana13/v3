@@ -10,16 +10,6 @@ from app.models import Base
 
 
 @pytest.fixture(autouse=True)
-def _clear_backpop_cancel():
-    """The cancel registry is module-level; clear it around each test so a leftover
-    run id (ids restart per in-memory DB) can't cancel an unrelated run."""
-    from app.backpop import _cancel_requested
-    _cancel_requested.clear()
-    yield
-    _cancel_requested.clear()
-
-
-@pytest.fixture(autouse=True)
 def isolated_duckdb(tmp_path, monkeypatch):
     """Point the DuckDB cache at a per-test temp file so no test can ever touch the
     real aggregate cache (e.g. chart deletion now drops a chart_<id>_data table).

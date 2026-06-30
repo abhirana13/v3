@@ -165,7 +165,7 @@ def latest_data_date(chart: Chart):
     if not chart.time_column:
         return None
     table = table_name(chart.id)
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(read_only=True)
     try:
         if not _table_exists(conn, table):
             return None
@@ -181,7 +181,7 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
     """Distinct values per dimension (for filter dropdowns) + the data's date
     extent (for defaulting the range picker). Read straight from DuckDB."""
     table = table_name(chart.id)
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(read_only=True)
     try:
         if not _table_exists(conn, table):
             return {"dimensions": {d.name: [] for d in effective_dimensions(chart, set())}, "date_min": None, "date_max": None}
@@ -286,7 +286,7 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
     table = table_name(chart.id)
     output_rows: list[dict] = []
 
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(read_only=True)
     try:
         if not _table_exists(conn, table):
             return {

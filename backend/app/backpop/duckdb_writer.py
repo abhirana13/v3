@@ -64,7 +64,7 @@ def drop_table(chart_id: int) -> None:
 
 def cache_columns(chart_id: int) -> set[str]:
     """Column names in a chart's cache table (empty set if it doesn't exist yet)."""
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(read_only=True)
     try:
         table = table_name(chart_id)
         if not conn.execute(
@@ -105,7 +105,7 @@ def materialize_derived(chart) -> None:
 def present_dates(
     chart_id: int, time_column: str, from_date: date, to_date: date
 ) -> set[date]:
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(read_only=True)
     try:
         table = table_name(chart_id)
         exists = conn.execute(

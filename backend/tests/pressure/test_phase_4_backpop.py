@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 
-from app.backpop import duckdb_writer
+from app.backpop import drain_backpop_queue, duckdb_writer
 
 DESC = [
     ("event_date", 1082, None, None, None, None, None),
@@ -47,7 +47,7 @@ def _create(client, **overrides):
     return r.json()["id"]
 
 
-def test_replace_batches_tile_the_range_contiguously(client, duckdb_path):
+def test_replace_batches_tile_the_range_contiguously(client, db_session, duckdb_path):
     """Every day in [from,to] is covered by exactly one batch, each <= batch_size,
     no overlap, no gap."""
     cid = _create(client, cur_date_behavior="batched", cache_strategy="replace", backpop_batch_size=7)
@@ -74,8 +74,10 @@ def test_replace_batches_tile_the_range_contiguously(client, duckdb_path):
             f"/charts/{cid}/backpopulate",
             json={"from_date": "2026-06-01", "to_date": "2026-06-20", "batch_size": 7},
         )
-    assert r.status_code == 200, r.text
-    assert r.json()["batches_completed"] == 3  # ceil(20/7)
+        assert r.status_code == 200, r.text
+        drain_backpop_queue(db_session)  # the work happens in the drain now (async endpoint)
+    run = client.get(f"/charts/{cid}/backpop-runs").json()[0]
+    assert run["batches_completed"] == 3  # ceil(20/7)
 
     windows = []
     for sql in calls:
@@ -96,7 +98,7 @@ def test_replace_batches_tile_the_range_contiguously(client, duckdb_path):
     assert covered == expected  # full coverage, no gaps
 
 
-def test_append_backpop_is_idempotent(client, duckdb_path):
+def test_append_backpop_is_idempotent(client, db_session, duckdb_path):
     """Running the same append backpop twice fetches the gaps once, then nothing —
     row count stable, no duplicate days."""
     cid = _create(client, cache_strategy="append")
@@ -113,11 +115,15 @@ def test_append_backpop_is_idempotent(client, duckdb_path):
 
     body = {"from_date": "2026-06-01", "to_date": "2026-06-05"}
     with patch("app.backpop.redshift_conn.connect", return_value=_ctx(cursor)):
-        r1 = client.post(f"/charts/{cid}/backpopulate", json=body)
-        r2 = client.post(f"/charts/{cid}/backpopulate", json=body)
+        client.post(f"/charts/{cid}/backpopulate", json=body)
+        drain_backpop_queue(db_session)  # run 1 fetches the 5 missing days
+        run1 = client.get(f"/charts/{cid}/backpop-runs").json()[0]
+        client.post(f"/charts/{cid}/backpopulate", json=body)
+        drain_backpop_queue(db_session)  # run 2: all present now -> nothing to fetch
+        run2 = client.get(f"/charts/{cid}/backpop-runs").json()[0]
 
-    assert r1.json()["row_count"] == 5   # 5 missing days fetched
-    assert r2.json()["row_count"] == 0   # nothing left to fetch (idempotent)
+    assert run1["row_count"] == 5   # 5 missing days fetched
+    assert run2["row_count"] == 0   # nothing left to fetch (idempotent)
 
     con = duckdb.connect(duckdb_path)
     table = duckdb_writer.table_name(cid)

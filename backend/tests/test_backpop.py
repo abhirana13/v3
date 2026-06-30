@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 
-from app.backpop import duckdb_writer, run_backpop
+from app.backpop import drain_backpop_queue, duckdb_writer
 
 
 @pytest.fixture
@@ -26,6 +26,17 @@ def _mock_redshift(description, rows):
     return ctx, cursor
 
 
+def _bp(client, db_session, chart_id, **body):
+    """Enqueue a manual backpop and drain it inline, returning the finished run as a dict.
+    Manual backpop is now async (the endpoint enqueues; the worker drains the queue), so a
+    test drives the drain itself. Call this INSIDE any redshift-mock `with` block so the
+    drained run's Redshift calls hit the mock (the work happens in the drain, not the POST)."""
+    r = client.post(f"/charts/{chart_id}/backpopulate", json=body)
+    assert r.status_code == 200, r.text
+    drain_backpop_queue(db_session)
+    return client.get(f"/charts/{chart_id}/backpop-runs").json()[0]  # most recent
+
+
 def _create_chart(client, **overrides):
     payload = {
         "name": overrides.get("name", "bp-chart"),
@@ -44,7 +55,7 @@ def _create_chart(client, **overrides):
     return r.json()
 
 
-def test_backpop_replace_uses_configured_batch_size(client, duckdb_path):
+def test_backpop_replace_uses_configured_batch_size(client, db_session, duckdb_path):
     """Batched mode runs contiguous batch_size-day windows (no per-day fill-missing)."""
     chart = _create_chart(client, cur_date_behavior="batched", cache_strategy="replace")
     description = [
@@ -55,12 +66,7 @@ def test_backpop_replace_uses_configured_batch_size(client, duckdb_path):
     rows = [(date(2026, 6, 14), "US", 100), (date(2026, 6, 14), "UK", 40)]
     ctx, _ = _mock_redshift(description, rows)
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-13", "batch_size": 2},
-        )
-    assert r.status_code == 200, r.text
-    body = r.json()
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-13", batch_size=2)
     assert body["status"] == "success"
     assert body["batches_completed"] == 2
     assert body["row_count"] == 4
@@ -73,7 +79,7 @@ def test_backpop_replace_uses_configured_batch_size(client, duckdb_path):
     assert count == 4
 
 
-def test_backpop_append_first_run_fetches_one_batch_per_date(client, duckdb_path):
+def test_backpop_append_first_run_fetches_one_batch_per_date(client, db_session, duckdb_path):
     """Append + time_column: fill-missing emits one batch per date regardless of batch_size."""
     chart = _create_chart(client, name="append-first-run", cache_strategy="append")
     description = [
@@ -84,17 +90,13 @@ def test_backpop_append_first_run_fetches_one_batch_per_date(client, duckdb_path
     rows = [(date(2026, 6, 14), "US", 100), (date(2026, 6, 14), "UK", 40)]
     ctx, _ = _mock_redshift(description, rows)
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-13", "batch_size": 2},
-        )
-    body = r.json()
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-13", batch_size=2)
     assert body["status"] == "success"
     assert body["batches_completed"] == 4   # one per missing day
     assert body["row_count"] == 8           # 4 batches * 2 rows
 
 
-def test_backpop_substitutes_dates_into_query(client, duckdb_path):
+def test_backpop_substitutes_dates_into_query(client, db_session, duckdb_path):
     chart = _create_chart(client)
     captured_sql = []
     cursor = MagicMock()
@@ -107,17 +109,14 @@ def test_backpop_substitutes_dates_into_query(client, duckdb_path):
     ctx.__enter__.return_value = conn
     ctx.__exit__.return_value = False
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-12", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-12", batch_size=1)
     assert len(captured_sql) == 3
     assert "'2026-06-10'" in captured_sql[0]
     assert "'2026-06-11'" in captured_sql[1]
     assert "'2026-06-12'" in captured_sql[2]
 
 
-def test_backpop_failure_records_error_and_partial_progress(client, duckdb_path):
+def test_backpop_failure_records_error_and_partial_progress(client, db_session, duckdb_path):
     chart = _create_chart(client)
     description = [
         ("event_date", 1082, None, None, None, None, None),
@@ -141,17 +140,13 @@ def test_backpop_failure_records_error_and_partial_progress(client, duckdb_path)
     ctx.__enter__.return_value = conn
     ctx.__exit__.return_value = False
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-13", "batch_size": 2},
-        )
-    body = r.json()
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-13", batch_size=2)
     assert body["status"] == "failed"
     assert "redshift kaboom" in body["error_message"]
     assert body["batches_completed"] == 1  # first batch succeeded
 
 
-def test_backpop_replace_strategy_overwrites_batch_window(client, duckdb_path):
+def test_backpop_replace_strategy_overwrites_batch_window(client, db_session, duckdb_path):
     chart = _create_chart(client, name="replace-chart", cache_strategy="replace")
     description = [
         ("event_date", 1082, None, None, None, None, None),
@@ -159,16 +154,10 @@ def test_backpop_replace_strategy_overwrites_batch_window(client, duckdb_path):
     ]
     ctx, _ = _mock_redshift(description, [(date(2026, 6, 10), 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
     ctx2, _ = _mock_redshift(description, [(date(2026, 6, 10), 999)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
 
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
@@ -178,7 +167,7 @@ def test_backpop_replace_strategy_overwrites_batch_window(client, duckdb_path):
     assert rows == [(999,)]
 
 
-def test_backpop_append_skips_dates_already_present(client, duckdb_path):
+def test_backpop_append_skips_dates_already_present(client, db_session, duckdb_path):
     """Append mode + time_column = fill-missing: re-running for the same date is a no-op."""
     chart = _create_chart(client, name="append-skip-chart", cache_strategy="append")
     description = [
@@ -187,19 +176,12 @@ def test_backpop_append_skips_dates_already_present(client, duckdb_path):
     ]
     ctx, _ = _mock_redshift(description, [(date(2026, 6, 10), 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
     ctx2, _ = _mock_redshift(description, [(date(2026, 6, 10), 999)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2) as p:
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
-    # Second call should not have hit Redshift at all
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
+    # Second run should not have hit Redshift at all
     assert p.call_count == 0
-    body = r.json()
     assert body["status"] == "success"
     assert body["batches_completed"] == 0
     assert body["row_count"] == 0
@@ -212,7 +194,7 @@ def test_backpop_append_skips_dates_already_present(client, duckdb_path):
     assert rows == [(100,)]
 
 
-def test_backpop_append_fills_only_missing_days(client, duckdb_path):
+def test_backpop_append_fills_only_missing_days(client, db_session, duckdb_path):
     """First run fills 2026-06-10 only. Second run for 2026-06-08..06-12 should
     fetch only the 4 missing days (08, 09, 11, 12) and skip 10."""
     chart = _create_chart(client, name="append-fill-chart", cache_strategy="append")
@@ -222,10 +204,7 @@ def test_backpop_append_fills_only_missing_days(client, duckdb_path):
     ]
     ctx1, _ = _mock_redshift(description, [(date(2026, 6, 10), 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
 
     captured_sql = []
     cursor2 = MagicMock()
@@ -238,11 +217,7 @@ def test_backpop_append_fills_only_missing_days(client, duckdb_path):
     ctx2.__enter__.return_value = conn
     ctx2.__exit__.return_value = False
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-08", "to_date": "2026-06-12", "batch_size": 1},
-        )
-    body = r.json()
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-08", to_date="2026-06-12", batch_size=1)
     assert body["status"] == "success"
     assert body["batches_completed"] == 4  # 08, 09, 11, 12 — skipped 10
     assert len(captured_sql) == 4
@@ -253,22 +228,16 @@ def test_backpop_append_fills_only_missing_days(client, duckdb_path):
     assert not any("2026-06-10" in sql for sql in captured_sql)
 
 
-def test_backpop_append_without_time_column_accumulates(client, duckdb_path):
+def test_backpop_append_without_time_column_accumulates(client, db_session, duckdb_path):
     """When time_column is not set, fill-missing can't dedupe, so append accumulates."""
     chart = _create_chart(client, name="no-time-col", cache_strategy="append", time_column=None)
     description = [("dau", 20, None, None, None, None, None)]
     ctx, _ = _mock_redshift(description, [(100,)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
     ctx2, _ = _mock_redshift(description, [(200,)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
 
     con = duckdb.connect(duckdb_path)
     count = con.execute(
@@ -278,7 +247,7 @@ def test_backpop_append_without_time_column_accumulates(client, duckdb_path):
     assert count == 2
 
 
-def test_backpop_batched_substitutes_window_dates(client, duckdb_path):
+def test_backpop_batched_substitutes_window_dates(client, db_session, duckdb_path):
     """Batched mode fills {START_DATE}/{END_DATE} with each window's own bounds."""
     chart = _create_chart(
         client, name="batched-window", cur_date_behavior="batched", backpop_batch_size=2
@@ -294,17 +263,14 @@ def test_backpop_batched_substitutes_window_dates(client, duckdb_path):
     ctx.__enter__.return_value = conn
     ctx.__exit__.return_value = False
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-13", "batch_size": 2},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-13", batch_size=2)
     # 4 days / 2-day windows = 2 batches, each spanning its own START..END
     assert len(captured_sql) == 2
     assert "'2026-06-10'" in captured_sql[0] and "'2026-06-11'" in captured_sql[0]
     assert "'2026-06-12'" in captured_sql[1] and "'2026-06-13'" in captured_sql[1]
 
 
-def test_backpop_batched_append_is_idempotent(client, duckdb_path):
+def test_backpop_batched_append_is_idempotent(client, db_session, duckdb_path):
     """A batched window overwrites its date range, so re-running the same range
     under cache_strategy='append' overwrites rather than duplicating rows."""
     chart = _create_chart(
@@ -321,19 +287,13 @@ def test_backpop_batched_append_is_idempotent(client, duckdb_path):
     first = [(date(2026, 6, d), 100) for d in (10, 11, 12, 13)]
     ctx, _ = _mock_redshift(description, first)
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        r1 = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-13"},
-        )
-    assert r1.json()["batches_completed"] == 1  # single 30-day window
+        body1 = _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-13")
+    assert body1["batches_completed"] == 1  # single 30-day window
 
     second = [(date(2026, 6, d), 999) for d in (10, 11, 12, 13)]
     ctx2, _ = _mock_redshift(description, second)
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-13"},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-13")
 
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
@@ -343,7 +303,7 @@ def test_backpop_batched_append_is_idempotent(client, duckdb_path):
     assert rows == [(999,), (999,), (999,), (999,)]  # overwritten, not 8 rows
 
 
-def test_backpop_rebuilds_cache_when_query_changes(client, duckdb_path):
+def test_backpop_rebuilds_cache_when_query_changes(client, db_session, duckdb_path):
     """Editing the query invalidates the cache: the next backpop REPLACES the
     already-cached dates instead of skipping them via append fill-missing."""
     chart = _create_chart(client, name="query-change", cache_strategy="append")
@@ -354,10 +314,7 @@ def test_backpop_rebuilds_cache_when_query_changes(client, duckdb_path):
     # first build: 2026-06-10 -> dau 100
     ctx, _ = _mock_redshift(description, [(date(2026, 6, 10), 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
 
     # change the query (different SQL => different hash)
     new_query = "SELECT event_date, dau FROM t2 WHERE event_date BETWEEN DATE '{START_DATE}' AND DATE '{END_DATE}'"
@@ -366,13 +323,10 @@ def test_backpop_rebuilds_cache_when_query_changes(client, duckdb_path):
     # re-backpop the SAME date: must hit Redshift (rebuild) and overwrite 100 -> 999
     ctx2, _ = _mock_redshift(description, [(date(2026, 6, 10), 999)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2) as p:
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
     assert p.call_count == 1  # NOT skipped — the query changed, so the date is refetched
-    assert r.json()["status"] == "success"
-    assert r.json()["row_count"] == 1
+    assert body["status"] == "success"
+    assert body["row_count"] == 1
 
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
@@ -382,7 +336,7 @@ def test_backpop_rebuilds_cache_when_query_changes(client, duckdb_path):
     assert rows == [(999,)]  # replaced — not [(100,)] (skipped) nor [(100,), (999,)] (appended)
 
 
-def test_backpop_refreshes_trailing_window_day(client, duckdb_path):
+def test_backpop_refreshes_trailing_window_day(client, db_session, duckdb_path):
     """A day inside the trailing refresh window (last N days) is ALWAYS re-pulled and
     overwritten on a re-run, so late-arriving Redshift data is caught without a query
     change — the exact scenario where pre-3PM data was cached then updated."""
@@ -395,20 +349,14 @@ def test_backpop_refreshes_trailing_window_day(client, duckdb_path):
     # first run caches the recent day with dau=100 (the "pre-3PM" snapshot)
     ctx1, _ = _mock_redshift(description, [(recent, 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": recent.isoformat(), "to_date": recent.isoformat(), "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date=recent.isoformat(), to_date=recent.isoformat(), batch_size=1)
     # Redshift now reports MORE for that same day (late arrival): dau=175
     ctx2, _ = _mock_redshift(description, [(recent, 175)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2) as p:
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": recent.isoformat(), "to_date": recent.isoformat(), "batch_size": 1},
-        )
+        body = _bp(client, db_session, chart["id"], from_date=recent.isoformat(), to_date=recent.isoformat(), batch_size=1)
     assert p.call_count == 1  # re-fetched, NOT skipped
-    assert r.json()["status"] == "success"
-    assert r.json()["row_count"] == 1
+    assert body["status"] == "success"
+    assert body["row_count"] == 1
 
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
@@ -418,7 +366,7 @@ def test_backpop_refreshes_trailing_window_day(client, duckdb_path):
     assert rows == [(175,)]  # overwritten — not [(100,)] (skip) nor [(100,), (175,)] (dup)
 
 
-def test_backpop_empty_refetch_does_not_wipe_cached_refresh_day(client, duckdb_path):
+def test_backpop_empty_refetch_does_not_wipe_cached_refresh_day(client, db_session, duckdb_path):
     """If a refresh-window day comes back empty on re-fetch (transient blip / data not
     in yet), its cached rows are preserved rather than wiped to nothing."""
     chart = _create_chart(client, name="refresh-empty-guard")
@@ -429,18 +377,12 @@ def test_backpop_empty_refetch_does_not_wipe_cached_refresh_day(client, duckdb_p
     ]
     ctx1, _ = _mock_redshift(description, [(recent, 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": recent.isoformat(), "to_date": recent.isoformat(), "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date=recent.isoformat(), to_date=recent.isoformat(), batch_size=1)
     # re-fetch returns NO rows — must not delete the cached day
     ctx2, _ = _mock_redshift(description, [])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": recent.isoformat(), "to_date": recent.isoformat(), "batch_size": 1},
-        )
-    assert r.json()["status"] == "success"
+        body = _bp(client, db_session, chart["id"], from_date=recent.isoformat(), to_date=recent.isoformat(), batch_size=1)
+    assert body["status"] == "success"
 
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
@@ -450,7 +392,7 @@ def test_backpop_empty_refetch_does_not_wipe_cached_refresh_day(client, duckdb_p
     assert rows == [(100,)]  # preserved, not wiped
 
 
-def test_backpop_force_overwrites_present_older_day(client, duckdb_path):
+def test_backpop_force_overwrites_present_older_day(client, db_session, duckdb_path):
     """force=True re-pulls and overwrites every day in range, even an OLD cached day
     that fill-missing (outside the refresh window) would otherwise skip."""
     chart = _create_chart(client, name="force-overwrite")
@@ -461,19 +403,13 @@ def test_backpop_force_overwrites_present_older_day(client, duckdb_path):
     ]
     ctx1, _ = _mock_redshift(description, [(date(2026, 5, 1), 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": day, "to_date": day, "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date=day, to_date=day, batch_size=1)
     # Redshift restated that old day; force re-pulls it (a normal run would skip it)
     ctx2, _ = _mock_redshift(description, [(date(2026, 5, 1), 999)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2) as p:
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": day, "to_date": day, "batch_size": 1, "force": True},
-        )
+        body = _bp(client, db_session, chart["id"], from_date=day, to_date=day, batch_size=1, force=True)
     assert p.call_count == 1  # re-fetched despite being present + old
-    assert r.json()["status"] == "success"
+    assert body["status"] == "success"
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
         f"SELECT dau FROM {duckdb_writer.table_name(chart['id'])} ORDER BY 1"
@@ -482,7 +418,7 @@ def test_backpop_force_overwrites_present_older_day(client, duckdb_path):
     assert rows == [(999,)]  # overwritten — not [(100,)] (skip) nor [(100,), (999,)] (dup)
 
 
-def test_backpop_force_clears_day_that_now_returns_empty(client, duckdb_path):
+def test_backpop_force_clears_day_that_now_returns_empty(client, db_session, duckdb_path):
     """A forced run is an explicit 'match Redshift for this range': if a day now
     returns no rows it IS cleared (unlike the auto refresh-window empty guard)."""
     chart = _create_chart(client, name="force-wipe")
@@ -493,17 +429,11 @@ def test_backpop_force_clears_day_that_now_returns_empty(client, duckdb_path):
     ]
     ctx1, _ = _mock_redshift(description, [(date(2026, 5, 2), 100)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx1):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": day, "to_date": day, "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date=day, to_date=day, batch_size=1)
     ctx2, _ = _mock_redshift(description, [])  # force-refetch returns nothing
     with patch("app.backpop.redshift_conn.connect", return_value=ctx2):
-        r = client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": day, "to_date": day, "batch_size": 1, "force": True},
-        )
-    assert r.json()["status"] == "success"
+        body = _bp(client, db_session, chart["id"], from_date=day, to_date=day, batch_size=1, force=True)
+    assert body["status"] == "success"
     con = duckdb.connect(duckdb_path)
     rows = con.execute(
         f"SELECT dau FROM {duckdb_writer.table_name(chart['id'])} "
@@ -514,14 +444,15 @@ def test_backpop_force_clears_day_that_now_returns_empty(client, duckdb_path):
 
 
 def test_cancel_stops_run_before_batches_and_marks_cancelled(client, db_session, duckdb_path):
-    """A run whose id is flagged for cancellation stops without fetching, and keeps
-    whatever was already written (here: nothing, cancelled before batch 1)."""
-    from app.backpop import _cancel_requested, _create_run, _run_batches
+    """A run flagged for cancellation stops without fetching, and keeps whatever was
+    already written (here: nothing, cancelled before batch 1). The flag is a DB column."""
+    from app.backpop import _create_run, _run_batches
     from app.models import Chart
 
     chart = _create_chart(client, name="cancel-me")
     run = _create_run(db_session, chart["id"], from_date=date(2026, 6, 10), to_date=date(2026, 6, 12), batch_size=1)
-    _cancel_requested.add(run.id)
+    run.cancel_requested = True
+    db_session.commit()
 
     ctx, _ = _mock_redshift([("event_date", 1082, None, None, None, None, None)], [(date(2026, 6, 10),)])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx) as p:
@@ -534,7 +465,7 @@ def test_cancel_stops_run_before_batches_and_marks_cancelled(client, db_session,
 
 
 def test_cancel_endpoint_flags_running_run(client, db_session):
-    from app.backpop import _cancel_requested, _create_run
+    from app.backpop import _create_run
 
     chart = _create_chart(client, name="cancel-ep")
     run = _create_run(db_session, chart["id"], from_date=date(2026, 6, 10), to_date=date(2026, 6, 10))
@@ -542,9 +473,31 @@ def test_cancel_endpoint_flags_running_run(client, db_session):
 
     r = client.post(f"/charts/{chart['id']}/backpop-runs/{run.id}/cancel")
     assert r.status_code == 200
-    assert run.id in _cancel_requested  # loop will see this and stop
+    db_session.refresh(run)
+    assert run.cancel_requested is True  # loop will see this and stop
 
     assert client.post(f"/charts/{chart['id']}/backpop-runs/999999/cancel").status_code == 404
+
+
+def test_cancel_queued_run_marks_cancelled_so_worker_skips_it(client, db_session, duckdb_path):
+    """Cancelling a run that's still queued marks it 'cancelled' up front; the drainer
+    only claims 'queued' runs, so it never executes (no Redshift call)."""
+    chart = _create_chart(client, name="cancel-queued")
+    r = client.post(
+        f"/charts/{chart['id']}/backpopulate",
+        json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
+    )
+    run = r.json()
+    assert run["status"] == "queued"
+
+    c = client.post(f"/charts/{chart['id']}/backpop-runs/{run['id']}/cancel")
+    assert c.status_code == 200
+    assert c.json()["status"] == "cancelled"
+
+    with patch("app.backpop.redshift_conn.connect") as p:
+        n = drain_backpop_queue(db_session)
+    assert n == 0            # nothing claimable — the run was cancelled
+    assert p.call_count == 0
 
 
 def test_backpop_chart_not_found(client):
@@ -552,19 +505,33 @@ def test_backpop_chart_not_found(client):
     assert r.status_code == 404
 
 
-def test_list_backpop_runs_returns_most_recent_first(client, duckdb_path):
+def test_backpop_enqueues_and_returns_queued(client, db_session, duckdb_path):
+    """The endpoint returns immediately with a 'queued' run; the work happens when the
+    queue is drained (so a long backfill never blocks the request)."""
+    chart = _create_chart(client, name="enqueue-shape")
+    r = client.post(
+        f"/charts/{chart['id']}/backpopulate",
+        json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "queued"
+
+    description = [("event_date", 1082, None, None, None, None, None), ("dau", 20, None, None, None, None, None)]
+    ctx, _ = _mock_redshift(description, [(date(2026, 6, 10), 5)])
+    with patch("app.backpop.redshift_conn.connect", return_value=ctx):
+        assert drain_backpop_queue(db_session) == 1
+    latest = client.get(f"/charts/{chart['id']}/backpop-runs").json()[0]
+    assert latest["status"] == "success"
+    assert latest["row_count"] == 1
+
+
+def test_list_backpop_runs_returns_most_recent_first(client, db_session, duckdb_path):
     chart = _create_chart(client, name="runs-list")
     description = [("event_date", 1082, None, None, None, None, None)]
     ctx, _ = _mock_redshift(description, [])
     with patch("app.backpop.redshift_conn.connect", return_value=ctx):
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-10", "to_date": "2026-06-10", "batch_size": 1},
-        )
-        client.post(
-            f"/charts/{chart['id']}/backpopulate",
-            json={"from_date": "2026-06-11", "to_date": "2026-06-11", "batch_size": 1},
-        )
+        _bp(client, db_session, chart["id"], from_date="2026-06-10", to_date="2026-06-10", batch_size=1)
+        _bp(client, db_session, chart["id"], from_date="2026-06-11", to_date="2026-06-11", batch_size=1)
     r = client.get(f"/charts/{chart['id']}/backpop-runs")
     assert r.status_code == 200
     runs = r.json()

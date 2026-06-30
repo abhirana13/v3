@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.backpop import request_cancel, run_backpop
+from datetime import datetime, timezone
+
+from app.backpop import enqueue_run, request_cancel
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.models import BackpopRun
@@ -17,10 +19,12 @@ def trigger_backpop(
     payload: BackpopRequest | None = None,
     db: Session = Depends(get_db),
 ):
+    """Queue a backpop and return immediately — the worker executes it (so a long
+    backfill never blocks/times out the request). Poll the returned run for progress."""
     if crud_charts.get(db, chart_id) is None:
         raise HTTPException(status_code=404, detail="chart not found")
     payload = payload or BackpopRequest()
-    run = run_backpop(
+    return enqueue_run(
         db,
         chart_id=chart_id,
         from_date=payload.from_date,
@@ -28,18 +32,25 @@ def trigger_backpop(
         batch_size=payload.batch_size,
         force=payload.force,
     )
-    return run
 
 
 @router.post("/{chart_id}/backpop-runs/{run_id}/cancel", response_model=BackpopRunRead)
 def cancel_backpop(chart_id: int, run_id: int, db: Session = Depends(get_db)):
-    """Request cancellation of a running backpop. The run's loop stops at the next
-    batch boundary and is marked 'cancelled'; rows already written are kept."""
+    """Cancel a backpop. A queued run is marked cancelled so the worker skips it; a
+    running run is flagged and its loop stops at the next batch boundary (rows already
+    written are kept)."""
     run = db.get(BackpopRun, run_id)
     if run is None or run.chart_id != chart_id:
         raise HTTPException(status_code=404, detail="backpop run not found")
-    if run.status == "running":
-        request_cancel(run_id)
+    if run.status == "queued":
+        run.status = "cancelled"
+        run.cancel_requested = True
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(run)
+    elif run.status == "running":
+        request_cancel(db, run_id)
+        db.refresh(run)
     return run
 
 
