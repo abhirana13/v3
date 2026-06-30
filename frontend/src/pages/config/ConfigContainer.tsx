@@ -255,7 +255,11 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       const run = await api.backpopulate(id, { from_date: range.start, to_date: range.end, batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)), force: range.force })
       await loadRuns(id)
       onSaved(id) // refresh chart list in the background; stay on this page
-      if (run.status === 'success') {
+      if (run.status === 'queued' || run.status === 'running') {
+        // backpop is async now: the endpoint returns immediately with a queued run and the
+        // worker executes it. The history below polls, so it updates queued → running → success.
+        setToast(`Backpopulation queued (${run.from_date} → ${run.to_date}) — running in the background; the history below updates live.`)
+      } else if (run.status === 'success') {
         setToast(`✓ Backpopulation complete · ${run.row_count.toLocaleString()} rows (${run.from_date} → ${run.to_date})`)
       } else if (run.status === 'cancelled') {
         setToast(`Backpopulation cancelled · ${run.row_count.toLocaleString()} rows kept`)

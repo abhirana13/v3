@@ -250,13 +250,19 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   const onMetricToggle = useCallback((id: string) => setMetrics((ms) => ms.map((m) => m.id === id ? { ...m, visible: !m.visible } : m)), [])
   const onMetricsToggleAll = useCallback((on: boolean) => setMetrics((ms) => ms.map((m) => ({ ...m, visible: on }))), [])
 
-  /* ---- backpopulation (runs the chart's default window immediately) ---- */
+  /* ---- backpopulation (queues the chart's default window; the worker runs it) ---- */
   const onBackpopulate = useCallback(async () => {
     setBackpopBusy(true); setToast('Backpopulation started…')
     try {
       const run = await api.backpopulate(chartId)
-      setToast(`Backpopulation ${run.status} · ${run.row_count.toLocaleString()} rows (${run.from_date} → ${run.to_date})`)
-      setDataReloadKey((k) => k + 1) // refetch data over the current range
+      // async backpop: the endpoint returns a queued run; the worker executes it. Don't
+      // report "0 rows" as if it finished, and don't refetch yet (data isn't ready).
+      if (run.status === 'queued' || run.status === 'running') {
+        setToast(`Backpopulation queued (${run.from_date} → ${run.to_date}) — running in the background; reload in a bit to see new data.`)
+      } else {
+        setToast(`Backpopulation ${run.status} · ${run.row_count.toLocaleString()} rows (${run.from_date} → ${run.to_date})`)
+        setDataReloadKey((k) => k + 1) // refetch data over the current range
+      }
     } catch (e: any) {
       setToast(`Backpopulation failed: ${String(e.message || e).slice(0, 160)}`)
     } finally {
