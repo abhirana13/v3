@@ -9,12 +9,18 @@ export interface ChartSummary {
   time_column: string | null
 }
 
+export interface Datasources {
+  databases: string[]
+  default: string
+}
+
 export interface ChartFull {
   id: number
   name: string
   chart_number: number | null
   certified: boolean
   source: string
+  database: string | null
   query: string
   refresh_interval: string
   default_backpop_days: number
@@ -44,6 +50,7 @@ export interface ChartWriteBody {
   name?: string
   certified?: boolean
   source?: string
+  database?: string | null
   query?: string
   refresh_interval?: string
   default_backpop_days?: number

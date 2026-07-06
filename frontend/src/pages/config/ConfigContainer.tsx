@@ -79,7 +79,9 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   charts: ChartSummary[]
 }) {
   const [savedId, setSavedId] = useState<number | null>(typeof target === 'number' ? target : null)
-  const [meta, setMeta] = useState<{ title: string; source: string; certified: boolean; number: number | null }>({ title: '', source: 'redshift', certified: false, number: null })
+  const [meta, setMeta] = useState<{ title: string; source: string; database: string; certified: boolean; number: number | null }>({ title: '', source: 'redshift', database: '', certified: false, number: null })
+  // Redshift databases this chart can target (same cluster). Loaded once; drives the selector.
+  const [datasources, setDatasources] = useState<{ databases: string[]; default: string }>({ databases: [], default: '' })
   const [variables, setVariables] = useState<VarRow[]>([])
   const [cache, setCache] = useState<Record<string, string>>({
     defaultDateRange: 'Last 90 Days', refreshInterval: 'Daily',
@@ -100,6 +102,9 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   const [toast, setToast] = useState<string | null>(null)
   const [runs, setRuns] = useState<BackpopRun[]>([])
 
+  /* ---- available Redshift databases for the selector ---- */
+  useEffect(() => { api.datasources().then(setDatasources).catch(() => {}) }, [])
+
   /* ---- prefill in edit mode ---- */
   useEffect(() => {
     if (typeof target !== 'number') return
@@ -109,7 +114,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
         const c = await api.getChart(target)
         const dm = await api.getDimsMetrics(target)
         if (!alive) return
-        setMeta({ title: c.name, source: c.source, certified: c.certified, number: c.chart_number })
+        setMeta({ title: c.name, source: c.source, database: c.database ?? '', certified: c.certified, number: c.chart_number })
         setVariables(varsToRows(c.variables))
         setCache({
           defaultDateRange: daysToLabel(c.default_date_range_days),
@@ -149,7 +154,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   }, [savedId, target])
 
   const buildBody = useCallback((): ChartWriteBody => ({
-    name: meta.title.trim(), source: meta.source, certified: meta.certified, query,
+    name: meta.title.trim(), source: meta.source, database: meta.database || null, certified: meta.certified, query,
     refresh_interval: cache.refreshInterval.toLowerCase(),
     default_backpop_days: Math.max(1, parseInt(cache.backpopDays || '7', 10)),
     backpop_batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)),
@@ -309,7 +314,8 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     <ConfigView
       mode={typeof target === 'number' ? 'edit' : 'create'}
       chartTitleLabel={meta.title || (typeof target === 'number' ? `Chart ${target}` : 'New chart')}
-      meta={meta} sourceOptions={['redshift']} onMetaChange={(patch) => setMeta((m) => ({ ...m, ...patch }))} previewNumber={previewNumber}
+      meta={{ ...meta, database: meta.database || datasources.default }} sourceOptions={['redshift']}
+      databaseOptions={datasources.databases} onMetaChange={(patch) => setMeta((m) => ({ ...m, ...patch }))} previewNumber={previewNumber}
       variables={variables} onVariablesChange={setVariables}
       cache={cache} onCacheChange={(patch) => setCache((c) => ({ ...c, ...patch }))}
       cacheOptions={{

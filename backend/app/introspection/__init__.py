@@ -56,6 +56,7 @@ def introspect_query(
     query: str,
     static_vars: dict | None = None,
     sample_date: date | None = None,
+    database: str | None = None,
 ) -> IntrospectionResult:
     sample_date = sample_date or date.today()
     batch = DateBatch(start_date=sample_date, end_date=sample_date)
@@ -68,7 +69,7 @@ def introspect_query(
 
     sql = _prepare_for_limit_zero(substituted)
     try:
-        with redshift_conn.connect() as conn:
+        with redshift_conn.connect(database=database) as conn:
             cursor = conn.cursor()
             cursor.execute(sql)
             description = cursor.description or []

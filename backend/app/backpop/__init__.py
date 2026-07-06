@@ -22,8 +22,8 @@ def query_hash(chart: Chart) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _execute_redshift(sql: str) -> tuple[list[tuple], list[str]]:
-    with redshift_conn.connect() as conn:
+def _execute_redshift(sql: str, database: str | None = None) -> tuple[list[tuple], list[str]]:
+    with redshift_conn.connect(database=database) as conn:
         cursor = conn.cursor()
         cursor.execute(sql)
         cols = [c[0] for c in (cursor.description or [])]
@@ -239,7 +239,7 @@ def _run_batches(
                 cancelled = True
                 break
             sql = substitute(chart.query, static_vars, batch)
-            rows, cols = _execute_redshift(sql)
+            rows, cols = _execute_redshift(sql, database=chart.database)
             batch_cache = _batch_cache_strategy(chart, batch, refresh_cutoff, force=force)
             # don't let an empty re-fetch wipe an already-cached refresh-window day
             # (transient blip / data not in yet) — keep what's there until real rows

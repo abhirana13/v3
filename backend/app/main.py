@@ -6,6 +6,7 @@ from app.api.backpop import router as backpop_router
 from app.api.charts import router as charts_router
 from app.api.data import router as data_router
 from app.api.dims_metrics import router as dims_metrics_router
+from app.config import settings
 from app.connections import duckdb as duckdb_conn
 from app.connections import postgres as postgres_conn
 from app.connections import redshift as redshift_conn
@@ -24,6 +25,13 @@ app.include_router(charts_router)
 app.include_router(dims_metrics_router)
 app.include_router(backpop_router)
 app.include_router(data_router)
+
+
+@app.get("/datasources")
+def datasources():
+    """Redshift databases a chart may target (for the config-window selector). All on the
+    same cluster; a chart with database=null uses `default`."""
+    return {"databases": settings.redshift_database_options(), "default": settings.redshift_database}
 
 
 @app.get("/health")

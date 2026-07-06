@@ -1,7 +1,7 @@
 // Thin api-client. The ONLY place that knows the backend's URL shape, so the
 // UI stays decoupled (CLAUDE.md). Calls go to /api/* which Vite proxies to the
 // backend (prefix stripped).
-import type { BackpopRun, ChartFull, ChartOverview, ChartSummary, ChartWriteBody, DataQuery, DataResponse, DimsMetrics, DimValues, Freshness, IntrospectionResult, MetricCfg } from './types'
+import type { BackpopRun, ChartFull, ChartOverview, ChartSummary, ChartWriteBody, DataQuery, DataResponse, Datasources, DimsMetrics, DimValues, Freshness, IntrospectionResult, MetricCfg } from './types'
 
 const BASE = '/api'
 
@@ -42,6 +42,7 @@ const jsonBody = (method: string, body: unknown) => ({
 })
 
 export const api = {
+  datasources: () => json<Datasources>('/datasources'),
   listCharts: () => json<ChartSummary[]>('/charts'),
   getChart: (id: number) => json<ChartFull>(`/charts/${id}`),
   createChart: (body: ChartWriteBody) => json<ChartFull>('/charts', jsonBody('POST', body)),

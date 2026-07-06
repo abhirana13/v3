@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import duckdb
@@ -283,3 +284,35 @@ def test_serve_no_data_yet_returns_empty(client, duckdb_path):
     assert r.status_code == 200
     assert r.json()["row_count"] == 0
     assert r.json()["rows"] == []
+
+
+def test_datarequest_accepts_non_string_filter_values():
+    """An integer dimension (e.g. game_id) sends int filter values — the schema must accept
+    non-string scalars (previously typed list[str], which 422'd on an int like 4)."""
+    from app.schemas import DataRequest
+
+    req = DataRequest(filters={"game_id": [4, 3], "country": ["US"]})
+    assert req.filters["game_id"] == [4, 3]
+    assert req.filters["country"] == ["US"]
+
+
+def test_serve_filters_integer_dimension(client, duckdb_path):
+    """Filtering an integer dimension with int values returns 200 (not a 422) and matches
+    the int column with int params — reproduces the game_id=4 case from the UI."""
+    chart_id = _make_chart_with_config(client, dims=["game_id"], metrics=["dau"], name="int-dim")
+    _seed(
+        duckdb_path,
+        chart_id,
+        [("event_date", "DATE"), ("game_id", "BIGINT"), ("dau", "BIGINT")],
+        [
+            (date(2026, 6, 12), 4, 100),
+            (date(2026, 6, 12), 3, 50),
+            (date(2026, 6, 13), 4, 110),
+        ],
+    )
+    r = client.get(f"/charts/{chart_id}/data", params={"filters": json.dumps({"game_id": [4]})})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["row_count"] == 2  # only game_id=4 (two dates)
+    assert all(row["game_id"] == 4 for row in body["rows"])
+    assert sum(row["dau"] for row in body["rows"]) == 210

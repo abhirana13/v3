@@ -45,7 +45,7 @@ def get_chart_data(
     if chart is None:
         raise HTTPException(status_code=404, detail="chart not found")
 
-    parsed_filters: dict[str, list[str]] = {}
+    parsed_filters: dict[str, list[str | int | float | bool]] = {}
     if filters:
         try:
             parsed = json.loads(filters)

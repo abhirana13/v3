@@ -1,14 +1,31 @@
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.config import settings
+
+
+def _validate_database(v: str | None) -> str | None:
+    """A chart's target database must be one the backend is configured to allow (same
+    cluster, allowlisted name). None/'' => the default. When no allowlist is configured
+    (e.g. Redshift unset in tests) anything passes — there's nothing to enforce against."""
+    if not v:
+        return None
+    allowed = settings.redshift_database_options()
+    if allowed and v not in allowed:
+        raise ValueError(f"unknown database '{v}'; allowed: {', '.join(allowed)}")
+    return v
 
 
 class ChartBase(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     certified: bool = False
     source: str = "redshift"
+    database: str | None = None
     query: str = Field(min_length=1)
+
+    _check_database = field_validator("database")(_validate_database)
     refresh_interval: str = "daily"
     default_backpop_days: int = Field(default=7, gt=0)
     backpop_batch_size: int = Field(default=30, gt=0)
@@ -29,7 +46,10 @@ class ChartCreate(ChartBase):
 class ChartUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     source: str | None = None
+    database: str | None = None
     query: str | None = Field(default=None, min_length=1)
+
+    _check_database = field_validator("database")(_validate_database)
     refresh_interval: str | None = None
     default_backpop_days: int | None = Field(default=None, gt=0)
     backpop_batch_size: int | None = Field(default=None, gt=0)
@@ -162,7 +182,10 @@ class DataRequest(BaseModel):
     granularity: Literal["day", "week", "month"] = "day"
     dimensions: list[str] | None = None  # None = group by all configured dims
     metrics: list[str] | None = None  # None = include all configured metrics
-    filters: dict[str, list[str]] = Field(default_factory=dict)
+    # dimension values can be non-string (e.g. an integer id column like game_id used as a
+    # dimension) — accept scalars as-is; serving passes them straight through as SQL params,
+    # so an int column is matched with int params (coercing to str would mismatch the column).
+    filters: dict[str, list[str | int | float | bool]] = Field(default_factory=dict)
     hide_zero: bool = False
 
     @model_validator(mode="after")

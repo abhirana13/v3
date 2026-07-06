@@ -26,6 +26,9 @@ class Chart(Base):
     chart_number = Column(Integer, nullable=True, unique=True, index=True)
     certified = Column(Boolean, nullable=False, default=False)
     source = Column(String(64), nullable=False, default="redshift")
+    # Redshift database this chart queries (same cluster, different db name). Null => the
+    # default (settings.redshift_database). Chosen from settings.redshift_database_options().
+    database = Column(String(128), nullable=True)
     query = Column(Text, nullable=False)
 
     refresh_interval = Column(String(32), nullable=False, default="daily")

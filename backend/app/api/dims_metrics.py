@@ -18,7 +18,7 @@ def introspect_chart(chart_id: int, db: Session = Depends(get_db)):
     if chart is None:
         raise HTTPException(status_code=404, detail="chart not found")
     try:
-        return introspect_query(chart.query, static_vars=dict(chart.variables or {}))
+        return introspect_query(chart.query, static_vars=dict(chart.variables or {}), database=chart.database)
     except IntrospectionError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

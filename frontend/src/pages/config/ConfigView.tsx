@@ -17,10 +17,11 @@ export type { VarRow } from './VariablesEditor'
 export interface ConfigViewProps {
   mode: 'create' | 'edit'
   chartTitleLabel: string
-  meta: { title: string; source: string; certified: boolean; number: number | null }
+  meta: { title: string; source: string; database: string; certified: boolean; number: number | null }
   sourceOptions: string[]
+  databaseOptions: string[]
   previewNumber?: number | null
-  onMetaChange: (patch: Partial<{ title: string; source: string; certified: boolean }>) => void
+  onMetaChange: (patch: Partial<{ title: string; source: string; database: string; certified: boolean }>) => void
   variables: VarRow[]; onVariablesChange: (rows: VarRow[]) => void
   cache: Record<string, string>; cacheOptions: Record<string, string[]>; onCacheChange: (patch: Record<string, string>) => void
   query: string; onQueryChange: (v: string) => void; queryTheme: string; onQueryThemeChange: (t: string) => void
@@ -61,6 +62,9 @@ export function ConfigView(p: ConfigViewProps) {
             <div className="grid grid-cols-3 gap-x-6 gap-y-3">
               <ConfigField label="Title" required><ConfigInput value={p.meta.title} onChange={(v) => p.onMetaChange({ title: v })} placeholder="Chart name" /></ConfigField>
               <ConfigField label="Source" required><ConfigSelect value={p.meta.source} onChange={(v) => p.onMetaChange({ source: v })} options={p.sourceOptions} center /></ConfigField>
+              {p.databaseOptions.length > 1 && (
+                <ConfigField label="Database" required hint="Which Redshift database this chart queries (same cluster). Backpopulation and the query editor both run against it."><ConfigSelect value={p.meta.database} onChange={(v) => p.onMetaChange({ database: v })} options={p.databaseOptions} center /></ConfigField>
+              )}
               <ConfigField label="Certified" hint="Certified charts are numbered from 100, drafts from 1000. Toggling re-numbers a saved chart immediately; a new chart gets its number on first save.">
                 <div className="flex items-center gap-3 py-1.5">
                   <button role="switch" aria-checked={p.meta.certified} onClick={() => p.onMetaChange({ certified: !p.meta.certified })}

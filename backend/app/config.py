@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     redshift_host: str = ""
     redshift_port: int = 5439
     redshift_database: str = ""
+    # Optional comma-separated allowlist of Redshift database names a chart may target
+    # (all on the SAME cluster / credentials as redshift_database — only the db name
+    # differs). Empty => only redshift_database is selectable.
+    redshift_databases: str = ""
     redshift_user: str = ""
     redshift_password: str = ""
 
@@ -24,6 +28,15 @@ class Settings(BaseSettings):
     backpop_refresh_window_days: int = 4
 
     log_level: str = "INFO"
+
+    def redshift_database_options(self) -> list[str]:
+        """Databases a chart may target — the configured allowlist, always including the
+        default (redshift_database) first. Empty allowlist => just the default. This is the
+        set the per-chart selector offers and validates against."""
+        names = [d.strip() for d in (self.redshift_databases or "").split(",") if d.strip()]
+        if self.redshift_database and self.redshift_database not in names:
+            names.insert(0, self.redshift_database)
+        return names
 
 
 settings = Settings()

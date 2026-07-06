@@ -8,11 +8,13 @@ from app.config import settings
 
 
 @contextmanager
-def connect():
+def connect(database: str | None = None):
+    """Open a read-only connection. `database` picks which database on the cluster to
+    query (same host/credentials); None => the default (settings.redshift_database)."""
     conn = redshift_connector.connect(
         host=settings.redshift_host,
         port=settings.redshift_port,
-        database=settings.redshift_database,
+        database=database or settings.redshift_database,
         user=settings.redshift_user,
         password=settings.redshift_password,
     )
