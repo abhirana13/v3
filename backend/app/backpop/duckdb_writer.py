@@ -141,9 +141,14 @@ def write_batch(
         ).fetchone()
 
         if not existing:
-            if not columns:
+            # Never create the table from an EMPTY first batch: with no rows to
+            # infer from, every column would be typed VARCHAR — poisoning all
+            # later inserts (numeric metrics coerced to text, aggregations then
+            # fail with binder errors). Report 0 rows written and let the first
+            # NON-empty batch create the table with properly inferred types.
+            if not columns or not rows:
                 return 0
-            types = _infer_types(columns, rows) if rows else ["VARCHAR"] * len(columns)
+            types = _infer_types(columns, rows)
             cols_def = ", ".join(f"{_quote(c)} {t}" for c, t in zip(columns, types))
             conn.execute(f"CREATE TABLE {_quote(table)} ({cols_def})")
 
@@ -151,8 +156,13 @@ def write_batch(
         # just created has nothing to delete, and skipping avoids a type error if
         # the first window came back empty (columns would default to VARCHAR).
         if existing and cache_strategy == "replace" and time_column:
+            # CAST the time column to DATE so the range delete works whether it was
+            # stored as DATE or VARCHAR (matches present_dates()). Without the cast,
+            # a VARCHAR time column vs DATE bind params raises a DuckDB BinderException
+            # ("cannot mix VARCHAR and DATE in BETWEEN").
             conn.execute(
-                f"DELETE FROM {_quote(table)} WHERE {_quote(time_column)} BETWEEN ? AND ?",
+                f"DELETE FROM {_quote(table)} "
+                f"WHERE CAST({_quote(time_column)} AS DATE) BETWEEN ? AND ?",
                 [batch.start_date, batch.end_date],
             )
 
