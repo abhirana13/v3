@@ -188,14 +188,19 @@ function FilterManager({ candidates, active, onToggle }: {
   )
 }
 
-export function EditToolbar({ chips, filterCandidates, onAddWidget, onToggleFilterDim, onFilterChange, onToggleSplit }: {
+export function EditToolbar({ chips, filterCandidates, onAddWidget, onToggleFilterDim, onFilterChange, onToggleSplit, onReorderFilter }: {
   chips: FilterChipState[]
   filterCandidates: string[] | null
   onAddWidget: (type: 'chart' | 'number') => void
   onToggleFilterDim: (dim: string, on: boolean) => void // add/remove a chip
   onFilterChange: (dim: string, values: FilterChipState['selected']) => void
   onToggleSplit: (dim: string) => void
+  onReorderFilter: (from: number, to: number) => void
 }) {
+  // drag-to-reorder: live-swap as the dragged chip enters another's slot. dragIdx
+  // lives in a ref (logic) + dragDim in state (the opacity cue).
+  const dragIdx = useRef<number | null>(null)
+  const [dragDim, setDragDim] = useState<string | null>(null)
   return (
     <div className="flex flex-wrap items-center gap-2 px-6 pt-3">
       <AddWidgetMenu onAddWidget={onAddWidget} />
@@ -205,9 +210,15 @@ export function EditToolbar({ chips, filterCandidates, onAddWidget, onToggleFilt
         onToggle={onToggleFilterDim}
       />
       {chips.length > 0 && <span className="mx-1 h-5 w-px bg-slate-200" />}
-      {chips.map((c) => (
+      {chips.map((c, i) => (
         <FilterChip key={c.dimension} chip={c} onFilterChange={onFilterChange} onToggleSplit={onToggleSplit}
-          onRemove={(dim) => onToggleFilterDim(dim, false)} />
+          onRemove={(dim) => onToggleFilterDim(dim, false)}
+          drag={{
+            onDragStart: (e) => { dragIdx.current = i; setDragDim(c.dimension); try { e.dataTransfer.effectAllowed = 'move' } catch { /* jsdom */ } },
+            onDragEnter: () => { const from = dragIdx.current; if (from !== null && from !== i) { onReorderFilter(from, i); dragIdx.current = i } },
+            onDragEnd: () => { dragIdx.current = null; setDragDim(null) },
+            dragging: dragDim === c.dimension,
+          }} />
       ))}
     </div>
   )
@@ -215,7 +226,7 @@ export function EditToolbar({ chips, filterCandidates, onAddWidget, onToggleFilt
 
 /* ---------- editable grid ---------- */
 
-export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChange, onWidgetSettings, onWidgetDuplicate, onWidgetDelete }: {
+export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChange, onWidgetSettings, onWidgetDuplicate, onWidgetDelete, movingAvgWindow }: {
   widgets: DashWidget[]
   layoutById: Record<number, WidgetLayout>
   dataById: Record<number, WidgetDataState | undefined>
@@ -223,6 +234,7 @@ export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChan
   onWidgetSettings: (id: number) => void
   onWidgetDuplicate: (id: number) => void
   onWidgetDelete: (id: number) => void
+  movingAvgWindow: number | null
 }) {
   // Freeze the layout prop for the lifetime of this mount: RGL manages positions
   // internally while the user drags/resizes and reports changes via
@@ -275,7 +287,7 @@ export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChan
             <div key={String(w.id)}>
               {w.type === 'chart' ? (
                 <ChartWidgetCard title={w.name} data={st.chart || null} config={w.config}
-                  loading={st.loading} error={st.error} leading={leading} trailing={trailing} />
+                  loading={st.loading} error={st.error} leading={leading} trailing={trailing} movingAvgWindow={movingAvgWindow} />
               ) : (
                 <NumberWidget title={w.name} data={st.number || null}
                   loading={st.loading} error={st.error} leading={leading} trailing={trailing} />

@@ -82,9 +82,9 @@ export function TabBar({ tabs, activeId, onTabChange }: {
 
 const GRAN_LABEL: Record<string, string> = { day: 'Day', week: 'Week', month: 'Month' }
 
-export function ControlsRow({ granularity, dateRange, onGranularityChange, onDateRangeChange }: {
-  granularity: string; dateRange: DateRange
-  onGranularityChange: (g: string) => void; onDateRangeChange: (r: DateRange) => void
+export function ControlsRow({ granularity, dateRange, movingAvg, onGranularityChange, onDateRangeChange, onToggleMovingAvg }: {
+  granularity: string; dateRange: DateRange; movingAvg: boolean
+  onGranularityChange: (g: string) => void; onDateRangeChange: (r: DateRange) => void; onToggleMovingAvg: (on: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -95,6 +95,13 @@ export function ControlsRow({ granularity, dateRange, onGranularityChange, onDat
   }, [])
   return (
     <div className="flex items-center px-6 pt-3">
+      <button onClick={() => onToggleMovingAvg(!movingAvg)}
+        title="Plot every chart as a trailing 7-day moving average"
+        className={'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[13px] font-medium transition-colors ' +
+          (movingAvg ? 'border-sky-400 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300')}>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 15c3 0 4-8 7-8s4 8 7 8 4-3 4-3" /></svg>
+        7-day avg
+      </button>
       <div className="ml-auto flex items-center gap-2">
         <div ref={ref} className="relative">
           <button onClick={() => setOpen(!open)} className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-600 hover:border-slate-300">
@@ -126,16 +133,26 @@ export interface FilterChipState {
   split: boolean          // unchecked chip => split every chart widget by this dimension
 }
 
+// Horizontal drag-to-reorder wiring (edit mode only) — the whole chip is the
+// drag source; a grip is shown as the affordance.
+export interface ChipDrag {
+  onDragStart: (e: React.DragEvent) => void
+  onDragEnter: (e: React.DragEvent) => void
+  onDragEnd: (e: React.DragEvent) => void
+  dragging: boolean
+}
+
 // A dimension filter chip, mirroring the chart view's DimensionChip:
 //  - leading checkbox = SPLIT toggle (checked = aggregated; UNCHECK to split all
 //    chart widgets by this dimension), badge reads "Split" / "Split · N";
 //  - value dropdown filters values (whole-row toggle, "All" clears). Empty = All,
 //    so an All chip shows every value checked and unchecking one narrows.
-export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove }: {
+export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove, drag }: {
   chip: FilterChipState
   onFilterChange: (dim: string, values: FilterValue[]) => void
   onToggleSplit: (dim: string) => void
   onRemove?: (dim: string) => void // edit mode: delete this chip from the dashboard
+  drag?: ChipDrag // edit mode: drag-to-reorder
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -161,7 +178,18 @@ export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove }: {
     }
   }
   return (
-    <div ref={ref} className={'relative inline-flex items-center gap-2 rounded-md border bg-white py-[5px] pl-2 pr-1.5 text-[13px] ' + (open ? 'border-sky-400 ring-2 ring-sky-100' : chip.split ? 'border-violet-400 ring-2 ring-violet-100' : 'border-slate-200 hover:border-slate-300')}>
+    <div ref={ref}
+      draggable={!!drag}
+      onDragStart={drag?.onDragStart}
+      onDragEnter={drag?.onDragEnter}
+      onDragOver={drag ? (e) => e.preventDefault() : undefined}
+      onDragEnd={drag?.onDragEnd}
+      className={'relative inline-flex items-center gap-2 rounded-md border bg-white py-[5px] pr-1.5 text-[13px] transition-opacity ' + (drag ? 'cursor-grab pl-1 active:cursor-grabbing ' : 'pl-2 ') + (drag?.dragging ? 'opacity-40 ' : '') + (open ? 'border-sky-400 ring-2 ring-sky-100' : chip.split ? 'border-violet-400 ring-2 ring-violet-100' : 'border-slate-200 hover:border-slate-300')}>
+      {drag && (
+        <span title="Drag to reorder" className="text-slate-300">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="9" cy="6" r="1.4" /><circle cx="15" cy="6" r="1.4" /><circle cx="9" cy="12" r="1.4" /><circle cx="15" cy="12" r="1.4" /><circle cx="9" cy="18" r="1.4" /><circle cx="15" cy="18" r="1.4" /></svg>
+        </span>
+      )}
       <Checkbox checked={!chip.split} onChange={() => onToggleSplit(chip.dimension)} />
       <button type="button" onClick={() => setOpen((o) => !o)} className="flex items-center gap-2">
         <span className="font-medium text-slate-700">{chip.dimension}</span>
@@ -232,10 +260,11 @@ export interface WidgetDataState {
   number?: NumberWidgetData
 }
 
-export function WidgetGrid({ widgets, dataById, onOpenChart }: {
+export function WidgetGrid({ widgets, dataById, onOpenChart, movingAvgWindow }: {
   widgets: DashWidget[]
   dataById: Record<number, WidgetDataState | undefined>
   onOpenChart: (chartId: number) => void
+  movingAvgWindow: number | null
 }) {
   const layout = useMemo(
     () => widgets.map((w) => ({ i: String(w.id), ...w.layout, static: true })),
@@ -260,6 +289,7 @@ export function WidgetGrid({ widgets, dataById, onOpenChart }: {
                   loading={st.loading}
                   error={st.error}
                   onExpand={() => onOpenChart(w.source_chart_id)}
+                  movingAvgWindow={movingAvgWindow}
                 />
               ) : (
                 <NumberWidget

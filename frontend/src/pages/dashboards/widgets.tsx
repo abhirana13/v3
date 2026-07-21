@@ -25,6 +25,18 @@ export function compactNum(v: number, decimals = 2): string {
 
 const withUnit = (v: string, unit: string | null) => (unit ? `${unit} ${v}` : v)
 
+// trailing mean over `window` buckets — same view transform as the chart view
+function movingAverage(data: (number | null)[], window: number): (number | null)[] {
+  return data.map((_, i) => {
+    let sum = 0, n = 0
+    for (let j = Math.max(0, i - window + 1); j <= i; j++) {
+      const v = data[j]
+      if (typeof v === 'number') { sum += v; n++ }
+    }
+    return n > 0 ? sum / n : null
+  })
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 // compact axis label: "2026-07-14" -> "Jul 14" (full ISO clutters + clips at the edge)
 function fmtAxisDate(iso: string): string {
@@ -170,7 +182,7 @@ function buildSeries(data: ChartWidgetData): { dates: string[]; series: BuiltSer
   return { dates, series, truncated }
 }
 
-export function ChartWidgetCard({ title, data, config, loading, error, onExpand, leading, trailing }: {
+export function ChartWidgetCard({ title, data, config, loading, error, onExpand, leading, trailing, movingAvgWindow }: {
   title: string
   data: ChartWidgetData | null
   config: Partial<ChartWidgetConfig>
@@ -179,6 +191,7 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
   onExpand?: () => void
   leading?: React.ReactNode
   trailing?: React.ReactNode
+  movingAvgWindow?: number | null // when set, plot each series as its trailing mean
 }) {
   const elRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<echarts.ECharts | null>(null)
@@ -216,9 +229,12 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
   useEffect(() => {
     const chart = chartRef.current
     if (!chart || !built) return
+    const plotted = movingAvgWindow && movingAvgWindow > 1
+      ? built.series.map((s) => ({ ...s, data: movingAverage(s.data, movingAvgWindow) }))
+      : built.series
     const metricAxis = new Map<string, 'primary' | 'secondary'>()
     for (const m of (config.metrics || []) as WidgetMetricSel[]) metricAxis.set(m.name, m.y_axis)
-    const hasSecondary = built.series.some((s) => metricAxis.get(s.metric) === 'secondary')
+    const hasSecondary = plotted.some((s) => metricAxis.get(s.metric) === 'secondary')
     const yCfg = config.y_axis || {}
 
     const axis = (which: 'primary' | 'secondary') => ({
@@ -249,7 +265,7 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
         axisLabel: { color: '#94a3b8', fontSize: 10, interval: Math.max(0, Math.floor(built.dates.length / 7) - 1), hideOverlap: true, formatter: (v: string) => fmtAxisDate(v) },
       },
       yAxis: hasSecondary ? [axis('primary'), axis('secondary')] : [axis('primary')],
-      series: built.series.map((s, i) => ({
+      series: plotted.map((s, i) => ({
         name: s.name,
         type: config.viz === 'bar' ? 'bar' : 'line',
         data: s.data,
@@ -270,7 +286,7 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
           : {}),
       })),
     }, true)
-  }, [built, config, inited])
+  }, [built, config, inited, movingAvgWindow])
 
   return (
     <WidgetChrome

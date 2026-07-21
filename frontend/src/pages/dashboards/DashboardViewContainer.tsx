@@ -66,6 +66,7 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
   const [activeTabId, setActiveTabId] = useState<number | null>(null)
   const [granularity, setGranularity] = useState('day')
   const [dateRange, setDateRange] = useState<DateRange | null>(null)
+  const [movingAvg, setMovingAvg] = useState(false) // view-only 7-day trailing mean on chart widgets
 
   // filter bar: chips are the editable draft; appliedFilters is what widgets use.
   // Read mode commits via Apply; edit mode applies live and persists chip selections
@@ -204,6 +205,14 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
   }, [updateChips])
   const onToggleSplit = useCallback((dim: string) => {
     updateChips((prev) => prev.map((c) => (c.dimension === dim ? { ...c, split: !c.split } : c)))
+  }, [updateChips])
+  const onReorderFilter = useCallback((from: number, to: number) => {
+    updateChips((prev) => {
+      const next = [...prev]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      return next
+    })
   }, [updateChips])
   const onApply = useCallback(() => { setAppliedFilters(chipsToFilters(chipsRef.current)); setAppliedSplit(chipsToSplit(chipsRef.current)); setDirty(false) }, [])
 
@@ -464,9 +473,9 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
         )}
       </div>
       <div className="shrink-0">
-        <ControlsRow granularity={granularity} dateRange={dateRange} onGranularityChange={setGranularity} onDateRangeChange={setDateRange} />
+        <ControlsRow granularity={granularity} dateRange={dateRange} movingAvg={movingAvg} onGranularityChange={setGranularity} onDateRangeChange={setDateRange} onToggleMovingAvg={setMovingAvg} />
         {editing ? (
-          <EditToolbar chips={chips} filterCandidates={filterCandidates} onAddWidget={openQuickAdd} onToggleFilterDim={onToggleFilterDim} onFilterChange={onFilterChange} onToggleSplit={onToggleSplit} />
+          <EditToolbar chips={chips} filterCandidates={filterCandidates} onAddWidget={openQuickAdd} onToggleFilterDim={onToggleFilterDim} onFilterChange={onFilterChange} onToggleSplit={onToggleSplit} onReorderFilter={onReorderFilter} />
         ) : (
           <GlobalFilterBar chips={chips} dirty={dirty} onFilterChange={onFilterChange} onToggleSplit={onToggleSplit} onApply={onApply} />
         )}
@@ -483,10 +492,11 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
               onWidgetSettings={onWidgetSettings}
               onWidgetDuplicate={onWidgetDuplicate}
               onWidgetDelete={onWidgetDelete}
+              movingAvgWindow={movingAvg ? 7 : null}
             />
           )
         ) : (
-          activeTab && <WidgetGrid widgets={activeTab.widgets} dataById={dataById} onOpenChart={onOpenChart} />
+          activeTab && <WidgetGrid widgets={activeTab.widgets} dataById={dataById} onOpenChart={onOpenChart} movingAvgWindow={movingAvg ? 7 : null} />
         )}
       </div>
       {quickAdd && (
