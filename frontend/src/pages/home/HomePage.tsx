@@ -25,7 +25,7 @@ function StatusPill({ status, running }: { status: string | null; running: boole
 
 const cfgUrl = (target: number | 'new') => `${window.location.pathname}?config=${target}`
 
-export function HomePage({ onOpenChart }: { onOpenChart: (id: number) => void }) {
+export function HomePage({ onOpenChart, onOpenDashboards }: { onOpenChart: (id: number) => void; onOpenDashboards?: () => void }) {
   const [rows, setRows] = useState<ChartOverview[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [q, setQ] = useState('')
@@ -47,7 +47,12 @@ export function HomePage({ onOpenChart }: { onOpenChart: (id: number) => void })
         <div className="flex h-7 w-7 items-center justify-center rounded bg-sky-500 text-xs font-bold text-white">FG</div>
         <span className="text-[13px] font-semibold text-white">Analytics</span>
         <span className="text-[12px] text-slate-400">· All charts</span>
-        <button onClick={() => window.open(cfgUrl('new'), '_blank')} className="ml-auto rounded-md bg-sky-500 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-sky-600">+ New chart</button>
+        <div className="ml-auto flex items-center gap-2">
+          {onOpenDashboards && (
+            <button onClick={onOpenDashboards} className="rounded-md border border-slate-600 px-3 py-1.5 text-[12px] font-semibold text-slate-200 hover:bg-slate-700">Dashboards</button>
+          )}
+          <button onClick={() => window.open(cfgUrl('new'), '_blank')} className="rounded-md bg-sky-500 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-sky-600">+ New chart</button>
+        </div>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">

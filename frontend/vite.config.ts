@@ -8,6 +8,10 @@ const target = process.env.VITE_API_TARGET || 'http://backend:8000'
 
 export default defineConfig({
   plugins: [react()],
+  // react-draggable (inside react-grid-layout) reads process.env.DRAGGABLE_DEBUG
+  // at drag-start; Vite only substitutes process.env.NODE_ENV, so without this
+  // every drag/resize dies on "process is not defined" in the browser.
+  define: { 'process.env': {} },
   build: {
     rollupOptions: {
       output: {

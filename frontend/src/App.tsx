@@ -8,8 +8,15 @@ import type { ChartSummary } from './api/types'
 const ChartViewContainer = lazy(() => import('./pages/chart/ChartViewContainer').then((m) => ({ default: m.ChartViewContainer })))
 const ConfigContainer = lazy(() => import('./pages/config/ConfigContainer').then((m) => ({ default: m.ConfigContainer })))
 const HomePage = lazy(() => import('./pages/home/HomePage').then((m) => ({ default: m.HomePage })))
+const DashboardListPage = lazy(() => import('./pages/dashboards/DashboardListPage').then((m) => ({ default: m.DashboardListPage })))
+const DashboardViewContainer = lazy(() => import('./pages/dashboards/DashboardViewContainer').then((m) => ({ default: m.DashboardViewContainer })))
 
-type View = { name: 'home' } | { name: 'chart' } | { name: 'config'; target: number | 'new' }
+type View =
+  | { name: 'home' }
+  | { name: 'chart' }
+  | { name: 'config'; target: number | 'new' }
+  | { name: 'dashboards' }
+  | { name: 'dashboard'; id: number }
 
 export function App() {
   const [charts, setCharts] = useState<ChartSummary[] | null>(null)
@@ -18,6 +25,9 @@ export function App() {
     const params = new URLSearchParams(window.location.search)
     const cfg = params.get('config') // ?config=<id|new> opens the configure tab
     if (cfg != null) return { name: 'config', target: cfg === 'new' ? 'new' : Number(cfg) }
+    const dashboard = Number(params.get('dashboard')) // ?dashboard=<id> deep-links to a dashboard
+    if (Number.isInteger(dashboard) && dashboard > 0) return { name: 'dashboard', id: dashboard }
+    if (params.has('dashboards')) return { name: 'dashboards' } // the dashboards list
     const chart = Number(params.get('chart')) // ?chart=<id> deep-links straight to a chart
     if (Number.isInteger(chart) && chart > 0) return { name: 'chart' }
     return { name: 'home' } // default landing = charts list
@@ -44,6 +54,8 @@ export function App() {
     if (view.name === 'home') window.history.replaceState({}, '', base)
     else if (view.name === 'chart' && chartId != null) window.history.replaceState({}, '', `${base}?chart=${chartId}`)
     else if (view.name === 'config') window.history.replaceState({}, '', `${base}?config=${view.target}`)
+    else if (view.name === 'dashboards') window.history.replaceState({}, '', `${base}?dashboards`)
+    else if (view.name === 'dashboard') window.history.replaceState({}, '', `${base}?dashboard=${view.id}`)
   }, [view, chartId])
 
   if (error) return <Centered>Failed to load: {error}</Centered>
@@ -52,7 +64,27 @@ export function App() {
   // boundary so a lazy view's chunk shows the same "Loading…" fallback while it loads.
   let body: React.ReactNode
   if (view.name === 'home') {
-    body = <HomePage onOpenChart={(id) => { setChartId(id); setView({ name: 'chart' }) }} />
+    body = (
+      <HomePage
+        onOpenChart={(id) => { setChartId(id); setView({ name: 'chart' }) }}
+        onOpenDashboards={() => setView({ name: 'dashboards' })}
+      />
+    )
+  } else if (view.name === 'dashboards') {
+    body = (
+      <DashboardListPage
+        onOpen={(id) => setView({ name: 'dashboard', id })}
+        onGoCharts={() => setView({ name: 'home' })}
+      />
+    )
+  } else if (view.name === 'dashboard') {
+    body = (
+      <DashboardViewContainer
+        dashboardId={view.id}
+        onGoHome={() => setView({ name: 'dashboards' })}
+        onOpenDashboard={(id) => setView({ name: 'dashboard', id })}
+      />
+    )
   } else if (view.name === 'config') {
     body = (
       <ConfigContainer

@@ -1,7 +1,7 @@
 // Thin api-client. The ONLY place that knows the backend's URL shape, so the
 // UI stays decoupled (CLAUDE.md). Calls go to /api/* which Vite proxies to the
 // backend (prefix stripped).
-import type { BackpopRun, ChartFull, ChartOverview, ChartSummary, ChartWriteBody, DataQuery, DataResponse, Datasources, DimsMetrics, DimValues, Freshness, IntrospectionResult, MetricCfg } from './types'
+import type { BackpopRun, ChartFull, ChartOverview, ChartSummary, ChartWriteBody, DashboardFull, DashboardMeta, DashboardOverviewRow, DashTab, DashWidget, DataQuery, DataResponse, Datasources, DimsMetrics, DimValues, FilterValue, Freshness, GlobalFilters, IntrospectionResult, MetricCfg, WidgetData, WidgetLayout, WidgetWriteBody } from './types'
 
 const BASE = '/api'
 
@@ -73,4 +73,59 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     }),
+
+  // ---------- dashboards ----------
+  listDashboards: () => json<DashboardOverviewRow[]>('/dashboards'),
+  getDashboard: (id: number) => json<DashboardFull>(`/dashboards/${id}`),
+  createDashboard: (body: { name: string; enabled?: boolean; default_date_range_days?: number; default_end_offset_days?: number }) =>
+    json<DashboardMeta>('/dashboards', jsonBody('POST', body)),
+  updateDashboard: (id: number, body: Partial<{ name: string; enabled: boolean; default_date_range_days: number; default_end_offset_days: number }>) =>
+    json<DashboardMeta>(`/dashboards/${id}`, jsonBody('PUT', body)),
+  deleteDashboard: (id: number) =>
+    fetch(`${BASE}/dashboards/${id}`, { method: 'DELETE' }).then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+    }),
+  replicateDashboard: (id: number) => json<DashboardFull>(`/dashboards/${id}/replicate`, { method: 'POST' }),
+  dashboardFilterValues: (id: number) => json<{ values: Record<string, FilterValue[]> }>(`/dashboards/${id}/filter-values`),
+  getWidgetData: (dashboardId: number, widgetId: number, q: { from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[] }) => {
+    const parts: string[] = []
+    if (q.from) parts.push(`from_date=${q.from}`)
+    if (q.to) parts.push(`to_date=${q.to}`)
+    if (q.granularity) parts.push(`granularity=${q.granularity}`)
+    if (q.filters && Object.keys(q.filters).length) parts.push(`filters=${encodeURIComponent(JSON.stringify(q.filters))}`)
+    for (const d of q.split || []) parts.push(`split=${encodeURIComponent(d)}`)
+    return json<WidgetData>(`/dashboards/${dashboardId}/widgets/${widgetId}/data${parts.length ? `?${parts.join('&')}` : ''}`)
+  },
+  // render an unsaved widget (edit-mode working copy) from a posted config
+  previewWidgetData: (dashboardId: number, body: { type: 'chart' | 'number'; source_chart_id: number; config: Record<string, unknown>; from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[] }) =>
+    json<WidgetData>(`/dashboards/${dashboardId}/widget-preview`, jsonBody('POST', {
+      type: body.type,
+      source_chart_id: body.source_chart_id,
+      config: body.config,
+      from_date: body.from ?? null,
+      to_date: body.to ?? null,
+      granularity: body.granularity ?? 'day',
+      filters: body.filters ?? {},
+      split: body.split ?? [],
+    })),
+  addDashboardTab: (dashboardId: number, name: string) =>
+    json<DashTab>(`/dashboards/${dashboardId}/tabs`, jsonBody('POST', { name })),
+  updateDashboardTab: (dashboardId: number, tabId: number, body: Partial<{ name: string; display_order: number }>) =>
+    json<DashTab>(`/dashboards/${dashboardId}/tabs/${tabId}`, jsonBody('PUT', body)),
+  deleteDashboardTab: (dashboardId: number, tabId: number) =>
+    fetch(`${BASE}/dashboards/${dashboardId}/tabs/${tabId}`, { method: 'DELETE' }).then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+    }),
+  addDashboardWidget: (dashboardId: number, tabId: number, body: WidgetWriteBody) =>
+    json<DashWidget>(`/dashboards/${dashboardId}/tabs/${tabId}/widgets`, jsonBody('POST', body)),
+  updateDashboardWidget: (dashboardId: number, widgetId: number, body: WidgetWriteBody) =>
+    json<DashWidget>(`/dashboards/${dashboardId}/widgets/${widgetId}`, jsonBody('PUT', body)),
+  deleteDashboardWidget: (dashboardId: number, widgetId: number) =>
+    fetch(`${BASE}/dashboards/${dashboardId}/widgets/${widgetId}`, { method: 'DELETE' }).then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+    }),
+  saveTabLayout: (dashboardId: number, tabId: number, items: ({ widget_id: number } & WidgetLayout)[]) =>
+    json<DashTab>(`/dashboards/${dashboardId}/tabs/${tabId}/layout`, jsonBody('PUT', items)),
+  putDashboardFilters: (dashboardId: number, filters: { dimension: string; default_values?: FilterValue[] }[]) =>
+    json<DashboardFull>(`/dashboards/${dashboardId}/filters`, jsonBody('PUT', { filters })),
 }
