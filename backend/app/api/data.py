@@ -2,6 +2,7 @@ import json
 from datetime import date
 from typing import Literal
 
+import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -75,3 +76,11 @@ def get_chart_data(
         return serve_data(chart, req)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except duckdb.Error as e:
+        # e.g. a metric column cached as VARCHAR (aggregation binder error) — the
+        # cache table's types are stale/poisoned. Surface an actionable 400 with a
+        # rebuild hint instead of a blank 500.
+        raise HTTPException(
+            status_code=400,
+            detail=f"cache type error (rebuild this chart's data to fix): {e}",
+        )

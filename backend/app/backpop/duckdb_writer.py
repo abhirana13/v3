@@ -10,6 +10,7 @@ which dates in a window are already in DuckDB so it can skip them.
 """
 
 from datetime import date, datetime, time
+from decimal import Decimal
 
 from app.connections import duckdb as duckdb_conn
 from app.templating import DateBatch
@@ -37,6 +38,10 @@ def _duckdb_type(value) -> str:
         return "DATE"
     if isinstance(value, time):
         return "TIME"
+    # redshift_connector returns NUMERIC/DECIMAL columns as decimal.Decimal — map to
+    # DOUBLE so they're aggregatable (bool must be checked before int: bool subclasses int)
+    if isinstance(value, Decimal):
+        return "DOUBLE"
     return _PY_TO_DUCKDB.get(type(value), "VARCHAR")
 
 
@@ -58,6 +63,58 @@ def drop_table(chart_id: int) -> None:
     conn = duckdb_conn.get_connection()
     try:
         conn.execute(f"DROP TABLE IF EXISTS {_quote(table_name(chart_id))}")
+    finally:
+        conn.close()
+
+
+# DuckDB type-name prefixes we consider numeric (aggregatable). Covers integer,
+# float and decimal families — a metric column stored as anything else (VARCHAR,
+# etc.) is "poisoned" and can't be SUM()'d.
+_NUMERIC_TYPE_PREFIXES = (
+    "BIGINT", "INT", "SMALLINT", "TINYINT", "HUGEINT",
+    "UBIGINT", "UINT", "USMALLINT", "UTINYINT",
+    "DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC",
+)
+
+
+def _is_numeric_type(duckdb_type: str) -> bool:
+    u = duckdb_type.upper()
+    return any(u.startswith(p) for p in _NUMERIC_TYPE_PREFIXES)
+
+
+def poisoned_metric_columns(chart_id: int, metric_columns: set[str]) -> list[str]:
+    """Declared metric columns that exist in the cache table with a NON-numeric type —
+    the signature of a cache poisoned by bad first-batch inference (a sparse/all-NULL or
+    stringy first batch typed the column VARCHAR). Empty list if the table is absent or
+    every metric column is a numeric type (int/float/decimal all count as healthy)."""
+    conn = duckdb_conn.get_connection(read_only=True)
+    try:
+        table = table_name(chart_id)
+        if not conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+        ).fetchone():
+            return []
+        info = {r[1]: r[2] for r in conn.execute(f"PRAGMA table_info({_quote(table)})").fetchall()}
+        return [c for c in metric_columns if c in info and not _is_numeric_type(info[c])]
+    finally:
+        conn.close()
+
+
+def data_extent(chart_id: int, time_column: str) -> tuple[date | None, date | None]:
+    """(min, max) of the time column in the cache (both None if the table is absent).
+    Used to rebuild a poisoned cache over its FULL range so no history is dropped."""
+    conn = duckdb_conn.get_connection(read_only=True)
+    try:
+        table = table_name(chart_id)
+        if not conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+        ).fetchone():
+            return (None, None)
+        r = conn.execute(
+            f"SELECT MIN(CAST({_quote(time_column)} AS DATE)), "
+            f"MAX(CAST({_quote(time_column)} AS DATE)) FROM {_quote(table)}"
+        ).fetchone()
+        return (r[0], r[1]) if r else (None, None)
     finally:
         conn.close()
 
@@ -131,6 +188,7 @@ def write_batch(
     batch: DateBatch,
     cache_strategy: str,
     time_column: str | None,
+    numeric_columns: set[str] = frozenset(),
 ) -> int:
     conn = duckdb_conn.get_connection()
     try:
@@ -149,6 +207,15 @@ def write_batch(
             if not columns or not rows:
                 return 0
             types = _infer_types(columns, rows)
+            # A declared metric column must be numeric. If the first batch is all-NULL
+            # (a sparse metric — e.g. revenue only on some days) or comes back as a
+            # numeric string, inference yields VARCHAR and every later real value gets
+            # coerced to text, breaking SUM(). Force such columns to DOUBLE.
+            if numeric_columns:
+                types = [
+                    "DOUBLE" if columns[i] in numeric_columns and t not in ("BIGINT", "DOUBLE") else t
+                    for i, t in enumerate(types)
+                ]
             cols_def = ", ".join(f"{_quote(c)} {t}" for c, t in zip(columns, types))
             conn.execute(f"CREATE TABLE {_quote(table)} ({cols_def})")
 

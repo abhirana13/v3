@@ -546,3 +546,40 @@ def test_backpop_rejects_from_after_to(client):
         json={"from_date": "2026-06-15", "to_date": "2026-06-10"},
     )
     assert r.status_code == 422
+
+
+def test_backpop_heals_poisoned_cache(client, db_session, duckdb_path):
+    """A cache whose metric column is VARCHAR (poisoned) is dropped + rebuilt on the next
+    backpop — over its FULL existing range — with the metric re-typed numeric, so SUM works."""
+    chart = _create_chart(client, name="heal-me")
+    client.put(f"/charts/{chart['id']}/dims-metrics", json={
+        "time_column": "event_date",
+        "dimensions": [{"name": "country", "column_name": "country"}],
+        "metrics": [{"name": "dau", "column_name": "dau"}],
+    })
+    # poison the cache: dau stored as VARCHAR, two dated rows already present
+    t = duckdb_writer.table_name(chart["id"])
+    con = duckdb.connect(duckdb_path)
+    con.execute(f'CREATE TABLE "{t}" (event_date VARCHAR, country VARCHAR, dau VARCHAR)')
+    con.execute(f"INSERT INTO \"{t}\" VALUES ('2026-06-10','US','10'),('2026-06-11','US','20')")
+    con.close()
+    assert duckdb_writer.poisoned_metric_columns(chart["id"], {"dau"}) == ["dau"]
+
+    description = [
+        ("event_date", 1082, None, None, None, None, None),
+        ("country", 1043, None, None, None, None, None),
+        ("dau", 20, None, None, None, None, None),
+    ]
+    ctx, _ = _mock_redshift(description, [(date(2026, 6, 12), "US", 100)])
+    # request only 06-12; heal must expand back to the existing min (06-10)
+    with patch("app.backpop.redshift_conn.connect", return_value=ctx):
+        body = _bp(client, db_session, chart["id"], from_date="2026-06-12", to_date="2026-06-12")
+    assert body["status"] == "success"
+
+    con = duckdb.connect(duckdb_path)
+    dau_type = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info('{t}')").fetchall()}["dau"]
+    total = con.execute(f'SELECT SUM(dau) FROM "{t}"').fetchone()[0]  # no binder error
+    con.close()
+    assert dau_type in ("BIGINT", "DOUBLE")   # re-typed numeric
+    assert total is not None
+    assert duckdb_writer.poisoned_metric_columns(chart["id"], {"dau"}) == []  # healed

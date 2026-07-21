@@ -221,10 +221,34 @@ def _run_batches(
     if chart.cache_query_hash is not None and chart.cache_query_hash != current_hash:
         duckdb_writer.drop_table(chart.id)
 
+    from_eff, to_eff = run.from_date, run.to_date
+
+    # Auto-heal a poisoned cache: if a declared metric column is stored as a non-numeric
+    # type (VARCHAR — from bad first-batch inference), aggregations break. Drop and rebuild
+    # over the FULL cached range (∪ the requested range) so no history is lost and types
+    # re-infer cleanly (metric columns are forced numeric on create). Self-repairs on the
+    # next backpop — including the nightly — so no chart needs a manual rebuild.
+    metric_cols = {m.column_name for m in chart.metrics if m.column_name}
+    poisoned = duckdb_writer.poisoned_metric_columns(chart.id, metric_cols) if metric_cols else []
+    if poisoned:
+        if chart.time_column:
+            emin, emax = duckdb_writer.data_extent(chart.id, chart.time_column)
+            if emin is not None:
+                from_eff = min(from_eff, emin)
+            if emax is not None:
+                to_eff = max(to_eff, emax)
+        duckdb_writer.drop_table(chart.id)
+        print(
+            f"[backpop] chart {chart.id}: healing poisoned cache "
+            f"(non-numeric metric columns: {', '.join(poisoned)}); "
+            f"rebuilding {from_eff}..{to_eff}",
+            flush=True,
+        )
+
     today = datetime.now(timezone.utc).date()
     refresh_cutoff = _refresh_cutoff(today)
     batches = _compute_batches(
-        chart, run.from_date, run.to_date, run.batch_size, refresh_cutoff, force=force
+        chart, from_eff, to_eff, run.batch_size, refresh_cutoff, force=force
     )
     static_vars = dict(chart.variables or {})
 
@@ -256,6 +280,9 @@ def _run_batches(
                 duckdb_writer.write_batch(
                     chart_id=chart.id, columns=cols, rows=rows, batch=batch,
                     cache_strategy=batch_cache, time_column=chart.time_column,
+                    # base-metric columns must be typed numeric even if all-NULL in
+                    # the first batch (sparse metrics), else SUM() breaks later
+                    numeric_columns={m.column_name for m in chart.metrics if m.column_name},
                 )
             total_rows += len(rows)
             batches_done += 1
