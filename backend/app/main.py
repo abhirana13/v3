@@ -10,6 +10,7 @@ from app.config import settings
 from app.connections import duckdb as duckdb_conn
 from app.connections import postgres as postgres_conn
 from app.connections import redshift as redshift_conn
+from app.dashboards.api import router as dashboards_router
 from app.db import ensure_schema
 
 
@@ -25,6 +26,7 @@ app.include_router(charts_router)
 app.include_router(dims_metrics_router)
 app.include_router(backpop_router)
 app.include_router(data_router)
+app.include_router(dashboards_router)
 
 
 @app.get("/datasources")

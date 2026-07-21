@@ -9,6 +9,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.connections.postgres import engine
+from app.dashboards import models as _dashboards_models  # noqa: F401 — registers dashboard tables on Base
 from app.models import Base, Chart
 
 

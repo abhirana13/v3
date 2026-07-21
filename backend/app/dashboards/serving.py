@@ -1,0 +1,236 @@
+"""Widget serving — composition over the existing chart cache, zero new query logic.
+
+A chart widget resolves to ONE serve_data() call on its source chart:
+  - metrics / group_by come from the widget's config
+  - filters are the merge of the dashboard's global bar state and the widget's own
+    config filters (see merge_filters for the exact cascade rules)
+  - the date window is the dashboard's global range, with the widget's offset
+    capping the END date only (offset_mode 'only_on_end_date')
+
+Because it IS serve_data, a widget inherits the independent-metric dedupe and
+formula evaluation — a widget always shows the same numbers as its source chart.
+"""
+
+from datetime import date, timedelta
+
+from app.backpop.duckdb_writer import cache_columns
+from app.dashboards.models import Dashboard, Widget
+from app.dashboards.schemas import ChartWidgetConfig, NumberWidgetConfig
+from app.derived_dims import effective_dimensions
+from app.models import Chart
+from app.schemas import DataRequest
+from app.serving import _natural_key, dimension_values, serve_data
+
+# compare name -> how many days before the as-of date its reference value sits
+# (last_week = same weekday, 7 days prior — the WoW convention)
+_COMPARE_LOOKBACK = {"previous_day": 1, "last_week": 7}
+
+
+def _today() -> date:
+    return date.today()  # separated for deterministic tests
+
+
+def merge_filters(chart: Chart, global_filters: dict, widget_filters: dict) -> tuple[dict, bool]:
+    """Merge the dashboard's global filter state with a widget's own filters.
+
+    Rules (the global cascade):
+      - a global filter applies only if the source chart actually has that
+        dimension (declared or currently-effective derived) — mixed-chart
+        dashboards keep working, the filter just doesn't bind here;
+      - the widget's own filters narrow further;
+      - same dimension in both → intersection of the value sets (a widget can
+        never WIDEN past the global selection).
+
+    Returns (merged, empty_selection): empty_selection=True means an intersection
+    came up empty — the correct result is NO rows (serve_data would silently drop
+    an empty filter list, which would wrongly widen back to everything).
+    """
+    servable = {d.name for d in effective_dimensions(chart, cache_columns(chart.id))}
+
+    merged: dict[str, list] = {}
+    for dim, values in (global_filters or {}).items():
+        if values and dim in servable:
+            merged[dim] = list(values)
+
+    empty_selection = False
+    for dim, values in (widget_filters or {}).items():
+        if not values:
+            continue
+        if dim in merged:
+            allowed = set(merged[dim])
+            merged[dim] = [v for v in values if v in allowed]
+            if not merged[dim]:
+                empty_selection = True
+        else:
+            merged[dim] = list(values)
+    return merged, empty_selection
+
+
+def resolve_window(
+    dashboard: Dashboard,
+    offset_days: int | None,
+    from_date: date | None,
+    to_date: date | None,
+) -> tuple[date, date]:
+    """The widget's effective [from, to]. The offset (widget's own, else the
+    dashboard default) caps the END date at today − offset ('only_on_end_date'
+    mode: a requested from_date passes through untouched). With no dates given,
+    the window is the dashboard's default_date_range_days ending at the cap."""
+    offset = offset_days if offset_days is not None else dashboard.default_end_offset_days
+    cap = _today() - timedelta(days=offset)
+    to_eff = min(to_date, cap) if to_date else cap
+    from_eff = from_date or (to_eff - timedelta(days=dashboard.default_date_range_days - 1))
+    return from_eff, to_eff
+
+
+def _dim_columns(chart: Chart, dim_names: list[str]) -> list[str]:
+    """Row keys are COLUMN names while group_by uses dimension NAMES — hand the
+    frontend the mapping so it never has to guess row-key order."""
+    by_name = {d.name: d.column_name for d in effective_dimensions(chart, cache_columns(chart.id))}
+    return [by_name.get(d, d) for d in dim_names]
+
+
+def _empty_response(chart: Chart, widget: Widget, from_date, to_date, granularity, dims, metrics):
+    return {
+        "widget_id": widget.id,
+        "chart_id": chart.id,
+        "time_column": chart.time_column,
+        "dimension_columns": _dim_columns(chart, dims),
+        "from_date": from_date,
+        "to_date": to_date,
+        "granularity": granularity,
+        "dimensions": dims,
+        "metrics": metrics,
+        "rows": [],
+        "row_count": 0,
+    }
+
+
+def chart_widget_data(
+    dashboard: Dashboard,
+    widget: Widget,
+    chart: Chart,
+    from_date: date | None,
+    to_date: date | None,
+    granularity: str,
+    global_filters: dict,
+    extra_group_by=(),
+) -> dict:
+    cfg = ChartWidgetConfig.model_validate(widget.config)
+    from_eff, to_eff = resolve_window(dashboard, cfg.offset_days, from_date, to_date)
+    merged, empty_selection = merge_filters(chart, global_filters, cfg.filters)
+    metric_names = [m.name for m in cfg.metrics]
+
+    # Global "split" cuts (dashboard filter-bar chips the viewer unchecked) add to
+    # this widget's own group_by — but only dimensions the source chart actually has
+    # (others simply don't apply here, same rule as filters). Deduped, widget's first.
+    servable = {d.name for d in effective_dimensions(chart, cache_columns(chart.id))}
+    group_by = list(cfg.group_by)
+    for d in extra_group_by:
+        if d in servable and d not in group_by:
+            group_by.append(d)
+
+    if empty_selection:
+        return _empty_response(
+            chart, widget, from_eff, to_eff, granularity, group_by, metric_names
+        )
+
+    req = DataRequest(
+        from_date=from_eff,
+        to_date=to_eff,
+        granularity=granularity,
+        dimensions=group_by,
+        metrics=metric_names,
+        filters=merged,
+    )
+    result = serve_data(chart, req)
+    result["widget_id"] = widget.id
+    result["time_column"] = chart.time_column
+    result["dimension_columns"] = _dim_columns(chart, group_by)
+    return result
+
+
+def number_widget_data(
+    dashboard: Dashboard,
+    widget: Widget,
+    chart: Chart,
+    to_date: date | None,
+    global_filters: dict,
+) -> dict:
+    """value at the as-of date + deltas vs previous day and last week (same
+    weekday, 7 days prior).
+
+    All three values come from ONE serve_data() call over [as_of − 7, as_of] with
+    time-only grouping — so the tile inherits the chart's independent-metric
+    dedupe and formula evaluation, and always equals the number the source chart
+    would plot for that day. Deltas: abs = v − v_prev, pct = (v/v_prev − 1)·100;
+    null when either side is missing, pct also null when v_prev is 0."""
+    cfg = NumberWidgetConfig.model_validate(widget.config)
+    _, as_of = resolve_window(dashboard, cfg.offset_days, None, to_date)
+    merged, empty_selection = merge_filters(chart, global_filters, cfg.filters)
+
+    out = {
+        "widget_id": widget.id,
+        "chart_id": chart.id,
+        "metric": cfg.metric,
+        "as_of_date": as_of,
+        "value": None,
+        "compares": {c: None for c in cfg.compares},
+        # config echoed so the tile can format without a second fetch
+        "unit": cfg.unit,
+        "decimals": cfg.decimals,
+        "target": cfg.target,
+    }
+    if empty_selection:
+        return out
+
+    req = DataRequest(
+        from_date=as_of - timedelta(days=max(_COMPARE_LOOKBACK.values())),
+        to_date=as_of,
+        granularity="day",
+        dimensions=[],
+        metrics=[cfg.metric],
+        filters=merged,
+    )
+    result = serve_data(chart, req)
+    by_date = {row[chart.time_column]: row.get(cfg.metric) for row in result["rows"]}
+
+    value = by_date.get(as_of)
+    out["value"] = value
+
+    def _delta(ref_date: date) -> dict | None:
+        prev = by_date.get(ref_date)
+        if value is None or prev is None:
+            return None
+        return {
+            "abs": value - prev,
+            "pct": ((value / prev) - 1) * 100 if prev else None,
+        }
+
+    out["compares"] = {
+        c: _delta(as_of - timedelta(days=_COMPARE_LOOKBACK[c])) for c in cfg.compares
+    }
+    return out
+
+
+def filter_values(dashboard: Dashboard) -> dict:
+    """Options for the global filter-bar chips: for each configured filter
+    dimension, the distinct cached values UNIONED across every distinct source
+    chart on the dashboard that has that dimension (charts without it simply
+    don't contribute — same rule as the cascade itself)."""
+    wanted = [f.dimension for f in dashboard.filters]
+    if not wanted:
+        return {"values": {}}
+
+    charts: dict[int, Chart] = {}
+    for tab in dashboard.tabs:
+        for w in tab.widgets:
+            charts[w.source_chart_id] = w.source_chart
+
+    merged: dict[str, set] = {d: set() for d in wanted}
+    for chart in charts.values():
+        chart_vals = dimension_values(chart)["dimensions"]
+        for d in wanted:
+            if d in chart_vals:
+                merged[d].update(chart_vals[d])
+    return {"values": {d: sorted(merged[d], key=_natural_key) for d in wanted}}
