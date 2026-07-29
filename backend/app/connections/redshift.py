@@ -1,20 +1,65 @@
-"""Read-only Redshift connection. SELECT only — must never write."""
+"""Read-only Redshift connection. SELECT only — must never write.
+
+When BASTION_HOST is configured, every connection is opened through an SSH tunnel
+to the bastion (authenticated with the private key at BASTION_KEY_PATH) which
+forwards to the real Redshift endpoint. The tunnel is opened per connection and
+torn down with it — keeps the code shape simple; revisit if latency matters.
+"""
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import redshift_connector
 
 from app.config import settings
 
 
+def _bastion_enabled() -> bool:
+    return bool(settings.bastion_host)
+
+
 @contextmanager
 def connect(database: str | None = None):
     """Open a read-only connection. `database` picks which database on the cluster to
     query (same host/credentials); None => the default (settings.redshift_database)."""
+    db = database or settings.redshift_database
+
+    if _bastion_enabled():
+        from sshtunnel import SSHTunnelForwarder
+
+        key_path = settings.bastion_key_path
+        if not Path(key_path).exists():
+            raise RuntimeError(
+                f"BASTION_KEY_PATH not found on disk: {key_path}. "
+                "Place the private key at that path (chmod 600) and restart."
+            )
+
+        with SSHTunnelForwarder(
+            (settings.bastion_host, settings.bastion_port),
+            ssh_username=settings.bastion_user,
+            ssh_pkey=key_path,
+            remote_bind_address=(settings.redshift_host, settings.redshift_port),
+        ) as tunnel:
+            # ssl=False: the SSH tunnel already encrypts the hop; and the Redshift
+            # server cert wouldn't validate against 127.0.0.1 anyway.
+            conn = redshift_connector.connect(
+                host="127.0.0.1",
+                port=tunnel.local_bind_port,
+                database=db,
+                user=settings.redshift_user,
+                password=settings.redshift_password,
+                ssl=False,
+            )
+            try:
+                yield conn
+            finally:
+                conn.close()
+        return
+
     conn = redshift_connector.connect(
         host=settings.redshift_host,
         port=settings.redshift_port,
-        database=database or settings.redshift_database,
+        database=db,
         user=settings.redshift_user,
         password=settings.redshift_password,
     )

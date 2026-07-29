@@ -18,6 +18,7 @@ def test_redshift_check_issues_only_select_1_and_never_writes():
     with patch("app.connections.redshift.redshift_connector") as rc, \
          patch("app.connections.redshift.settings") as s:
         s.redshift_host = "real-cluster.example.com"
+        s.bastion_host = ""  # direct connect path
         rc.connect.return_value = conn
         result = redshift_conn.check()
 

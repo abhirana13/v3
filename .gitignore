@@ -19,6 +19,9 @@ dist/
 # Env
 .env
 
+# Secrets (private keys, etc.) — key must live only on the deploy host
+secrets/
+
 # Editor
 .vscode/
 .idea/

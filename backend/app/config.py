@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     redshift_user: str = ""
     redshift_password: str = ""
 
+    # Optional SSH bastion / jump host for Redshift. When bastion_host is set, all
+    # Redshift connections are opened through an SSH tunnel to (bastion_host:bastion_port)
+    # authenticated with the private key at bastion_key_path, then forwarded to the
+    # configured redshift_host:redshift_port. Empty bastion_host => direct connect.
+    bastion_host: str = ""
+    bastion_port: int = 22
+    bastion_user: str = ""
+    bastion_key_path: str = "/app/secrets/redshift_bastion.pem"
+
     postgres_host: str = "postgres"
     postgres_port: int = 5432
     postgres_db: str = "analytics_dash"
