@@ -14,6 +14,11 @@ dependencies = [
   "pydantic-settings>=2.2",
   "apscheduler>=3.10",
   "sshtunnel>=0.4.0",
+  # sshtunnel 0.4.0 references paramiko.DSSKey, which paramiko removed in 4.0.
+  # Without this cap the (lockfile-less) build resolves paramiko 5.x and every
+  # bastion Redshift connection dies with "module 'paramiko' has no attribute
+  # 'DSSKey'". 3.5.1 is the newest release that still ships DSSKey.
+  "paramiko>=3.4,<4",
 ]
 
 [project.optional-dependencies]
