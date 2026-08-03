@@ -40,15 +40,19 @@ def connect(database: str | None = None):
             ssh_pkey=key_path,
             remote_bind_address=(settings.redshift_host, settings.redshift_port),
         ) as tunnel:
-            # ssl=False: the SSH tunnel already encrypts the hop; and the Redshift
-            # server cert wouldn't validate against 127.0.0.1 anyway.
+            # Redshift requires SSL here (cluster has require_ssl on): a non-SSL
+            # connection is rejected at pg_hba with "no pg_hba.conf entry ... SSL off".
+            # ssl=True uses the driver default sslmode=verify-ca, which validates the
+            # server cert against the CA but NOT the hostname — so terminating at
+            # 127.0.0.1 through the tunnel still verifies. (Do NOT set ssl=False: the
+            # SSH hop being encrypted doesn't satisfy the cluster's SSL requirement.)
             conn = redshift_connector.connect(
                 host="127.0.0.1",
                 port=tunnel.local_bind_port,
                 database=db,
                 user=settings.redshift_user,
                 password=settings.redshift_password,
-                ssl=False,
+                ssl=True,
             )
             try:
                 yield conn
