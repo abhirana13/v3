@@ -24,6 +24,8 @@ services:
     volumes:
       - ./backend:/app
       - duckdb_data:/data
+      # in-process bastion tunnel reads the key from here (mirrors prod compose)
+      - ./secrets:/app/secrets:ro
     ports:
       - "8001:8000"
     depends_on:
@@ -39,6 +41,8 @@ services:
     volumes:
       - ./backend:/app
       - duckdb_data:/data
+      # in-process bastion tunnel reads the key from here (mirrors prod compose)
+      - ./secrets:/app/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
