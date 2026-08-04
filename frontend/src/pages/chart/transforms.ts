@@ -34,24 +34,8 @@ export function applyMovingAverage(data: ChartRow[], series: UISeries[], window:
   })
 }
 
-// X-axis = dimension: collapse time → categories are the cuts, value is the metric
-// summed over the whole range. One series per metric (cuts of one metric share metricKey).
-const XSEP = ''
-export function buildCategorical(data: ChartRow[], series: UISeries[]): { data: ChartRow[]; series: UISeries[] } {
-  const comboOf = (s: UISeries) => { const i = s.key.indexOf(XSEP); return i >= 0 ? s.key.slice(i + 1) : s.label }
-  const cats: string[] = []
-  const seenCat = new Set<string>()
-  for (const s of series) { const c = comboOf(s); if (!seenCat.has(c)) { seenCat.add(c); cats.push(c) } }
-  const metrics: UISeries[] = []
-  const seenM = new Set<string>()
-  for (const s of series) { const mk = s.metricKey || s.key; if (!seenM.has(mk)) { seenM.add(mk); metrics.push({ ...s, key: mk, label: s.metricKey || s.label, metricKey: mk }) } }
-  const keyByMC = new Map<string, string>()
-  for (const s of series) keyByMC.set((s.metricKey || s.key) + XSEP + comboOf(s), s.key)
-  const sumOver = (k: string) => data.reduce((acc, r) => acc + (typeof r[k] === 'number' ? (r[k] as number) : 0), 0)
-  const outData: ChartRow[] = cats.map((c) => {
-    const r: ChartRow = { date: c } // 'date' field carries the category for the X-axis
-    for (const m of metrics) { const sk = keyByMC.get(m.key + XSEP + c); r[m.key] = sk != null ? sumOver(sk) : null }
-    return r
-  })
-  return { data: outData, series: metrics }
-}
+// NOTE: buildCategorical() used to live here — it re-pivoted already-fetched split
+// series into categories in the browser. The x-axis dimension is now grouped by the
+// BACKEND (chart.x_axis / the x_axis query param), so rows arrive keyed on it directly:
+// correct aggregation at any cardinality, no 20-series split cap, and the
+// independent-metric dedup applied in SQL rather than re-derived from summed series.

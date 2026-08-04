@@ -191,7 +191,11 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     setLoading(true); setError(null)
     api.getData(chartId, {
       granularity: GRAN[granularity], from: dateRange.start || null, to: recencyEnd || null,
-      metrics: names, groupBy, filters, hideZero, xAxis: xAxisDim,
+      // Always send an EXPLICIT axis: the chart's saved x_axis is applied when loading the
+      // view (above), so from here the user's choice must win. Sending nothing would let the
+      // backend re-apply the saved default, making the picker's "Time" option a no-op on a
+      // chart that defaults to a pivot. The time column normalizes to a plain time series.
+      metrics: names, groupBy, filters, hideZero, xAxis: xAxisDim || cfg.time_column,
     }).then((resp) => {
       if (token !== fetchToken.current) return
       // Row key: the pivot dimension's column when pivoting, else the time column.
@@ -416,6 +420,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       onMetricToggle={onMetricToggle} onMetricsToggleAll={onMetricsToggleAll}
       onOpenMetricSettings={onOpenMetricSettings} onAddMetric={onAddMetric} onReorderMetrics={onReorderMetrics}
       hideZero={hideZero} onHideZeroToggle={setHideZero}
+      xDim={xAxisDim || ''} onXDim={(v) => setXAxisDim(v || null)} xAxisIsDate={xAxisIsDate}
       chartData={chartData} chartSeries={chartSeries}
       onBackpopulate={onBackpopulate} backpopBusy={backpopBusy}
       endOffset={endOffset} onEndOffsetChange={onEndOffsetChange} onShare={onShare} toast={toast}

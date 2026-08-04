@@ -15,7 +15,7 @@ import type { MetricDraft } from './MetricSettingsModal'
 import { MetricOrderModal } from './MetricOrderModal'
 import { ChartToolsRail } from './ChartToolsRail'
 import { DataTablePanel } from './DataTablePanel'
-import { applyMovingAverage, applyPercentage, buildCategorical } from './transforms'
+import { applyMovingAverage, applyPercentage } from './transforms'
 
 const DEFAULT_CHART_OPTIONS: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: true, logScale: false }
 
@@ -48,6 +48,11 @@ export interface ChartViewProps {
   settingsMetric: MetricDraft | null; settingsOpen: boolean; settingsError?: string | null
   onCloseSettings: () => void; onApplySettings: (d: MetricDraft) => void; onSaveSettings: (d: MetricDraft) => void; onDeleteSettings?: (d: MetricDraft) => void
   loading?: boolean; error?: string | null
+  // X-axis: '' => the time column; else a dimension key. Owned by the container so the
+  // fetch is re-issued through the backend (it does the grouping). Seeded from the chart's
+  // saved default; changing it here is a temporary, per-view override (never persisted).
+  xDim: string; onXDim: (v: string) => void
+  xAxisIsDate: boolean // pivot dimension holds dates => keep the date axis, not categories
   charts: { id: number; name: string; number?: number | null; certified?: boolean }[]; onSelectChart: (id: number) => void
   onGoHome: () => void
   onEditChart: (id: number) => void; onCreateChart: () => void
@@ -68,10 +73,14 @@ export function ChartView(p: ChartViewProps) {
   const [orderOpen, setOrderOpen] = useState(false)
   const [hidden, setHidden] = useState<Set<string>>(new Set()) // legend series hidden from the chart (visual only, no refetch)
   const maUnit = p.granularity === 'Week' ? 'weeks' : p.granularity === 'Month' ? 'months' : 'days'
-  const [xDim, setXDim] = useState('') // '' = Time; else a dimension key on the X-axis
+  // X-axis state lives in the container (it drives the backend query). The dimension no
+  // longer has to be split first: the backend groups by it, so any cardinality works.
+  const xDim = p.xDim
   const xDimObj = xDim ? p.dimensions.find((d) => d.key === xDim) : undefined
-  const xActive = !!xDim && !!xDimObj?.split
-  const xGuard = xDim && !xActive ? `Uncheck “${xDimObj?.label || xDim}” in the filter bar to use it as the X-axis.` : null
+  const xActive = !!xDim
+  // A date pivot (e.g. install_date) stays on the date axis — ordered, date-formatted, and
+  // time transforms still make sense. Any other dimension renders as true categories.
+  const catMode = xActive && !p.xAxisIsDate
   const xAxisDims = p.dimensions.map((d) => ({ key: d.key, label: d.label }))
 
   useEffect(() => {
@@ -87,15 +96,18 @@ export function ChartView(p: ChartViewProps) {
   // legendSeries = every series (drives the legend). The chart drops hidden ones
   // BEFORE the % / MA transforms, so a 100%-stack re-normalizes over what's visible.
   const { displayData, displaySeries, legendSeries } = useMemo(() => {
-    const base = xActive ? buildCategorical(p.chartData, p.chartSeries) : { data: p.chartData, series: p.chartSeries }
-    let data = base.data
-    let series = base.series.filter((s) => !hidden.has(hideKey(s)))
-    if (!xActive) {
+    // Rows arrive already grouped on the x-axis (the backend pivots), so there's no
+    // client-side re-pivot: just drop hidden series and apply the display transforms.
+    let data = p.chartData
+    let series = p.chartSeries.filter((s) => !hidden.has(hideKey(s)))
+    if (!catMode) {
+      // %-of-total and moving average assume an ordered axis — fine for time and for a
+      // date pivot, meaningless across unordered categories.
       if (pct) { const o = applyPercentage(data, series); data = o.data; series = o.series }
       if (ma) data = applyMovingAverage(data, series, maWindow)
     }
-    return { displayData: data, displaySeries: series, legendSeries: base.series }
-  }, [p.chartData, p.chartSeries, pct, ma, maWindow, xActive, hidden])
+    return { displayData: data, displaySeries: series, legendSeries: p.chartSeries }
+  }, [p.chartData, p.chartSeries, pct, ma, maWindow, catMode, hidden])
 
   const toggleHidden = (key: string) => setHidden((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n })
   const showAllSeries = () => setHidden(new Set())
@@ -117,7 +129,7 @@ export function ChartView(p: ChartViewProps) {
   }
   // when split, keep the metric name as a header with its cuts grouped beneath it;
   // otherwise a flat list of metric names
-  const isSplitLegend = !xActive && legendSeries.some((s) => s.comboLabel != null)
+  const isSplitLegend = !catMode && legendSeries.some((s) => s.comboLabel != null)
   const legend = isSplitLegend ? (
     <div className="flex flex-wrap items-start justify-center gap-x-8 gap-y-2">
       {[...new Map(legendSeries.map((s) => [s.metricKey, s])).keys()].map((mk) => {
@@ -146,8 +158,6 @@ export function ChartView(p: ChartViewProps) {
   ) : null
   const chartBody = p.error ? (
     <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-rose-500">{p.error}</div>
-  ) : xGuard ? (
-    <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-amber-600">{xGuard}</div>
   ) : p.splitNotice ? (
     <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-amber-600">{p.splitNotice}</div>
   ) : p.chartSeries.length === 0 ? (
@@ -155,7 +165,7 @@ export function ChartView(p: ChartViewProps) {
   ) : p.chartData.length === 0 ? (
     <div className="flex h-full items-center justify-center text-[13px] text-slate-400">No data in this range.</div>
   ) : (
-    <TimeSeriesChart data={displayData} series={displaySeries} seriesType={seriesType} percentStacked={pct && !xActive} granularity={p.granularity} display={opts} categorical={xActive} xLabel={xActive ? (xDimObj?.label || 'Dimension').toUpperCase() : 'TIME'} yLabelPrimary={displaySeries.find((s) => s.axis === 'primary')?.label} pngRef={pngRef} />
+    <TimeSeriesChart data={displayData} series={displaySeries} seriesType={seriesType} percentStacked={pct && !catMode} granularity={p.granularity} display={opts} categorical={catMode} xLabel={xActive ? (xDimObj?.label || 'Dimension').toUpperCase() : 'TIME'} yLabelPrimary={displaySeries.find((s) => s.axis === 'primary')?.label} pngRef={pngRef} />
   )
 
   return (
@@ -226,7 +236,7 @@ export function ChartView(p: ChartViewProps) {
           activeTab={p.metricsTab} onTabChange={p.onMetricsTabChange}
           chartOptions={opts} onChartOption={(k, v) => setOpts((o) => ({ ...o, [k]: v }))}
           ma={ma} maWindow={maWindow} onMaToggle={(v) => setMa(v)} onMaWindow={(n) => setMaWindow(n)} maUnit={maUnit}
-          xDim={xDim} onXDim={setXDim} xAxisDims={xAxisDims} xHint={xGuard}
+          xDim={xDim} onXDim={p.onXDim} xAxisDims={xAxisDims} xHint={null}
         />
       </div>
 
