@@ -300,6 +300,17 @@ def _run_batches(
         run.status = "failed"
         run.error_message = f"{type(e).__name__}: {e}"
     finally:
+        # Mirror the cache's newest date into Postgres so the home page can report freshness
+        # without opening DuckDB (which would contend with this very writer). Done here in
+        # the worker — the process that already owns the write lock — and attempted even on
+        # failure/cancel, since batches that did land are real data. Never fail the run over it.
+        if batches_done and chart.time_column:
+            try:
+                _, emax = duckdb_writer.data_extent(chart.id, chart.time_column)
+                if emax is not None:
+                    chart.cache_latest_date = emax
+            except Exception as e:
+                print(f"[backpop] chart {chart.id}: freshness mirror skipped ({e})", flush=True)
         run.completed_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(run)

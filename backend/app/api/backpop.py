@@ -72,7 +72,13 @@ def get_freshness(chart_id: int, db: Session = Depends(get_db)):
         > 0
     )
     return FreshnessRead(
-        latest_data_date=latest_data_date(chart),
+        # Prefer the value the worker mirrored into Postgres (no DuckDB lock to contend
+        # with while a backpop is running); read the cache only if it was never mirrored.
+        latest_data_date=(
+            chart.cache_latest_date
+            if chart.cache_latest_date is not None
+            else latest_data_date(chart)
+        ),
         running=running,
         last_run=last_run,
     )

@@ -46,6 +46,12 @@ class Chart(Base):
     # plot that dimension on the x-axis, collapsing time to a filter. See serving.serve_data.
     x_axis = Column(String(128), nullable=True)
 
+    # Max date present in this chart's DuckDB cache, mirrored into Postgres by the worker
+    # after each backpop. The home page reads freshness from HERE so it never opens the
+    # DuckDB file: DuckDB is single-writer across processes, so a running backpop would
+    # otherwise make every chart's freshness read contend with the writer.
+    cache_latest_date = Column(Date, nullable=True)
+
     variables = Column(JSON, nullable=False, default=dict, server_default="{}")
     # sha256 of (query + variables) the cached aggregates were last built from.
     # When it differs at backpop time, the cache is rebuilt (not fill-missing skipped).

@@ -10,7 +10,6 @@ from app.connections.postgres import SessionLocal, get_db
 from app.crud import charts as crud_charts
 from app.models import BackpopRun
 from app.schemas import ChartCreate, ChartOverview, ChartRead, ChartUpdate
-from app.serving import latest_data_date
 
 router = APIRouter(prefix="/charts", tags=["charts"])
 
@@ -53,7 +52,14 @@ def list_charts(db: Session = Depends(get_db)):
 
 @router.get("/overview", response_model=list[ChartOverview])
 def charts_overview(db: Session = Depends(get_db)):
-    """All charts + their freshness/last-backpop status in one call (home page)."""
+    """All charts + their freshness/last-backpop status in one call (home page).
+
+    Postgres only — deliberately never opens the DuckDB cache. It used to call
+    latest_data_date() per chart, i.e. one DuckDB connection each; DuckDB is single-writer
+    across processes, so during a backpop every one of those retried against the worker's
+    write lock and the home page stalled (unreachable with enough charts). Freshness is
+    mirrored into charts.cache_latest_date by the worker after each backpop instead.
+    """
     out: list[ChartOverview] = []
     for c in crud_charts.list_all(db):
         last = (
@@ -74,7 +80,7 @@ def charts_overview(db: Session = Depends(get_db)):
                 name=c.name,
                 chart_number=c.chart_number,
                 certified=c.certified,
-                latest_data_date=latest_data_date(c),
+                latest_data_date=c.cache_latest_date,
                 last_backpop_status=last.status if last else None,
                 last_backpop_at=last.completed_at if last else None,
                 last_backpop_rows=last.row_count if last else None,
