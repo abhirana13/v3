@@ -78,6 +78,14 @@ def ensure_schema(eng=None) -> None:
                 conn.execute(
                     text("ALTER TABLE metrics ALTER COLUMN column_name DROP NOT NULL")
                 )
+        if "metrics" in inspector.get_table_names():
+            if "included" not in {c["name"] for c in inspector.get_columns("metrics")}:
+                conn.execute(
+                    text(
+                        "ALTER TABLE metrics "
+                        "ADD COLUMN included BOOLEAN NOT NULL DEFAULT true"
+                    )
+                )
         if "dimensions" in inspector.get_table_names():
             dim_cols = {c["name"] for c in inspector.get_columns("dimensions")}
             if "value_order" not in dim_cols:
@@ -85,6 +93,13 @@ def ensure_schema(eng=None) -> None:
                     text(
                         "ALTER TABLE dimensions "
                         "ADD COLUMN value_order VARCHAR NOT NULL DEFAULT 'natural'"
+                    )
+                )
+            if "included" not in dim_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE dimensions "
+                        "ADD COLUMN included BOOLEAN NOT NULL DEFAULT true"
                     )
                 )
         if "backpop_runs" in inspector.get_table_names():

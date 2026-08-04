@@ -29,6 +29,7 @@ def replace(db: Session, chart_id: int, payload: DimsMetricsIn) -> Chart | None:
                 kind=d.kind,
                 value_order=d.value_order,
                 display_order=idx,
+                included=d.included,
             )
         )
     for idx, m in enumerate(payload.metrics):
@@ -42,6 +43,7 @@ def replace(db: Session, chart_id: int, payload: DimsMetricsIn) -> Chart | None:
                 decimals=m.decimals,
                 unit=m.unit,
                 display_order=idx,
+                included=m.included,
             )
         )
 

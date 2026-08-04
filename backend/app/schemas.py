@@ -81,6 +81,8 @@ class DimensionIn(BaseModel):
     column_name: str = Field(min_length=1, max_length=128)
     kind: Literal["regular", "time"] = "regular"
     value_order: Literal["natural", "metric"] = "natural"  # filter-value ordering
+    # False => configured but hidden from the chart's dimension list (still re-includable)
+    included: bool = True
     data_type: str | None = None  # introspection hint; not persisted
 
 
@@ -99,6 +101,8 @@ class MetricIn(BaseModel):
     y_axis: Literal["primary", "secondary"] = "primary"
     decimals: int = Field(default=0, ge=0, le=10)
     unit: str | None = Field(default=None, max_length=32)
+    # False => configured but hidden from the chart's metric list (still re-includable)
+    included: bool = True
     data_type: str | None = None  # introspection hint; not persisted
 
     @model_validator(mode="after")

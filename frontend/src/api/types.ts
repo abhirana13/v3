@@ -72,6 +72,8 @@ export interface DimensionCfg {
   kind: string
   value_order?: 'natural' | 'metric'
   derived?: boolean // computed in the backend (e.g. country_tier) — usable as a filter, not editable
+  // false => configured but hidden from the chart's dimension list (still in the config table)
+  included?: boolean
   data_type?: string | null
 }
 
@@ -83,6 +85,8 @@ export interface MetricCfg {
   y_axis: 'primary' | 'secondary'
   decimals: number
   unit: string | null
+  // false => configured but hidden from the chart's metric list (still in the config table)
+  included?: boolean
   data_type?: string | null
 }
 

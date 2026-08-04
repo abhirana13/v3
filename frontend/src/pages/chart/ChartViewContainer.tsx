@@ -83,13 +83,15 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         const dv = await api.getDimValues(chartId)
         if (!alive) return
         setCfg(dm)
-        setDimensions(dm.dimensions.map((d) => ({
+        // `included: false` => configured but hidden here (the config page still lists it,
+        // so it can be re-included). cfg keeps the full set for the save path below.
+        setDimensions(dm.dimensions.filter((d) => d.included ?? true).map((d) => ({
           key: d.name, label: d.name,
           values: dv.dimensions[d.name] || [],
           selected: dv.dimensions[d.name] || [],
           split: false,
         })))
-        setMetrics(dm.metrics.map((m, i) => ({
+        setMetrics(dm.metrics.filter((m) => m.included ?? true).map((m, i) => ({
           id: m.name, name: m.name, key: m.name, color: PALETTE[i % PALETTE.length],
           visible: i === 0, columnName: m.column_name,
           formula: m.formula || '', independentFields: m.independent_dimensions || [],
@@ -335,18 +337,24 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     // Preserve each dimension's saved value_order, and skip backend-derived dims
     // (e.g. country_tier) — otherwise a metric edit here would reset value ordering
     // to the default and persist a derived dim as a real one.
+    // PUT replaces everything, so carry the excluded dims/metrics through untouched —
+    // they aren't shown here, and omitting them would silently delete them.
     dimensions: cfg!.dimensions
       .filter((d) => !d.derived)
-      .map((d) => ({ name: d.name, column_name: d.column_name, value_order: d.value_order })),
-    metrics: uiMetrics.map<MetricCfg>((m) => ({
-      name: m.name,
-      column_name: m.formula ? null : (m.columnName ?? m.name),
-      independent_dimensions: m.independentFields || [],
-      formula: m.formula ? stripBrackets(m.formula) : null,
-      y_axis: m.axis || 'primary',
-      decimals: m.decimals ?? 0,
-      unit: m.unit && m.unit !== 'None' ? m.unit : null,
-    })),
+      .map((d) => ({ name: d.name, column_name: d.column_name, value_order: d.value_order, included: d.included ?? true })),
+    metrics: [
+      ...uiMetrics.map<MetricCfg>((m) => ({
+        name: m.name,
+        column_name: m.formula ? null : (m.columnName ?? m.name),
+        independent_dimensions: m.independentFields || [],
+        formula: m.formula ? stripBrackets(m.formula) : null,
+        y_axis: m.axis || 'primary',
+        decimals: m.decimals ?? 0,
+        unit: m.unit && m.unit !== 'None' ? m.unit : null,
+        included: true,
+      })),
+      ...cfg!.metrics.filter((m) => !(m.included ?? true)),
+    ],
   })
 
   const persist = async (uiMetrics: UIMetric[]) => {

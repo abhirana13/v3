@@ -124,11 +124,12 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
           dataRecency: String(c.default_end_offset_days ?? 2),
         })
         setQuery(c.query)
-        const dimNames = dm.dimensions.map((d) => d.name)
+        // only included dims can be the x-axis (an excluded one isn't offered in the chart)
+        const dimNames = dm.dimensions.filter((d) => d.included ?? true).map((d) => d.name)
         if (dm.dimensions.length || dm.metrics.length) {
           setColumns([
-            ...dm.dimensions.filter((d) => !d.derived).map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: d.value_order || 'natural', included: true })),
-            ...dm.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: m.independent_dimensions || [], formula: m.formula || null, decimals: m.decimals ?? 0, yAxis: m.y_axis || 'primary', unit: m.unit || null, included: true })),
+            ...dm.dimensions.filter((d) => !d.derived).map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: d.value_order || 'natural', included: d.included ?? true })),
+            ...dm.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: m.independent_dimensions || [], formula: m.formula || null, decimals: m.decimals ?? 0, yAxis: m.y_axis || 'primary', unit: m.unit || null, included: m.included ?? true })),
           ])
           setDims((s) => ({ ...s, timeColumn: dm.time_column || '', xAxis: dm.x_axis || dm.time_column || dimNames[0] || '', dateFormat: dm.date_format || '%Y-%m-%d', axisOptions: [dm.time_column || '', ...dimNames].filter(Boolean), timeOptions: [dm.time_column || ''].filter(Boolean) }))
           setGenerated(true)
@@ -217,22 +218,27 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   }
 
   const putDimsMetrics = async (id: number) => {
-    const includedDims = columns.filter((c) => c.classification === 'Dimension' && c.included)
-    const includedDimNames = new Set(includedDims.map((d) => d.name))
-    const metricsPayload = columns.filter((c) => c.classification === 'Metric' && c.included).map((m) => ({
+    // Send EVERY column, carrying `included` as a flag. Excluding must not delete the
+    // column: dropping it from the payload used to remove it from the chart entirely, so
+    // it vanished from this table (unrecoverable without re-introspecting) and left
+    // chart.x_axis dangling — which 400'd the chart with "unknown x_axis dimension".
+    const allDims = columns.filter((c) => c.classification === 'Dimension')
+    const dimNames = new Set(allDims.map((d) => d.name))
+    const metricsPayload = columns.filter((c) => c.classification === 'Metric').map((m) => ({
       name: m.name,
       // formula metrics are not column-backed (the backend requires exactly one of
       // column_name | formula); preserve everything edited in the chart view
       column_name: m.formula ? null : m.name,
-      independent_dimensions: (m.independentOf || []).filter((n) => includedDimNames.has(n)),
+      independent_dimensions: (m.independentOf || []).filter((n) => dimNames.has(n)),
       formula: m.formula || null,
       y_axis: m.yAxis || ('primary' as const),
       decimals: m.decimals ?? 0,
       unit: m.unit && m.unit !== 'None' ? m.unit : null,
+      included: m.included,
     }))
     await api.putDimsMetrics(id, {
       time_column: dims.timeColumn || null,
-      dimensions: includedDims.map((d) => ({ name: d.name, column_name: d.name, value_order: d.valueOrder || 'natural' })),
+      dimensions: allDims.map((d) => ({ name: d.name, column_name: d.name, value_order: d.valueOrder || 'natural', included: d.included })),
       metrics: metricsPayload,
     })
   }

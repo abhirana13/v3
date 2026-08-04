@@ -14,6 +14,23 @@ from app.serving import dimension_values, serve_data
 router = APIRouter(prefix="/charts", tags=["data"])
 
 
+def _usable_default_x_axis(chart) -> str | None:
+    """The chart's saved x_axis, but only while it still points at a usable dimension.
+
+    Returns None (=> plain time series) when the saved dimension no longer exists or has
+    been excluded, so a stale default can't make the chart unopenable. Derived dimensions
+    (e.g. country_tier) are always usable.
+    """
+    if not chart.x_axis or chart.x_axis == chart.time_column:
+        return None
+    from app.derived_dims import DERIVED_NAMES
+
+    if chart.x_axis in DERIVED_NAMES:
+        return chart.x_axis
+    usable = {d.name for d in chart.dimensions if d.included}
+    return chart.x_axis if chart.x_axis in usable else None
+
+
 @router.get("/{chart_id}/dim-values")
 def get_dim_values(
     chart_id: int,
@@ -69,8 +86,12 @@ def get_chart_data(
             from_date=from_date,
             to_date=to_date,
             granularity=granularity,
-            # explicit param wins; otherwise fall back to the chart's configured default
-            x_axis=x_axis if x_axis is not None else chart.x_axis,
+            # Explicit param wins; otherwise fall back to the chart's configured default.
+            # The default is only applied while it still names an INCLUDED dimension: a
+            # saved x_axis whose dimension was later excluded (or dropped by a query edit)
+            # must degrade to a plain time series, not 400 the chart into being unopenable.
+            # An explicitly-passed unknown dimension still errors — that's a caller bug.
+            x_axis=x_axis if x_axis is not None else _usable_default_x_axis(chart),
             dimensions=dims_in,
             metrics=metrics_in,
             filters=parsed_filters,

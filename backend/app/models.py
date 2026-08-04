@@ -93,6 +93,10 @@ class Dimension(Base):
     # "metric" (descending by the primary metric's total — biggest contributors first)
     value_order = Column(String(16), nullable=False, default="natural", server_default="natural")
     display_order = Column(Integer, nullable=False, default=0)
+    # False => hidden from the chart's dimension list (no filter chip / split option) but
+    # still configured, so it can be re-included. Excluding must never DELETE the column:
+    # that used to drop it from the config table entirely and dangle chart.x_axis.
+    included = Column(Boolean, nullable=False, default=True, server_default="true")
 
     chart = relationship("Chart", back_populates="dimensions")
 
@@ -112,6 +116,8 @@ class Metric(Base):
     decimals = Column(Integer, nullable=False, default=0)
     unit = Column(String(32), nullable=True)
     display_order = Column(Integer, nullable=False, default=0)
+    # False => hidden from the chart's metric list but still configured (see Dimension)
+    included = Column(Boolean, nullable=False, default=True, server_default="true")
 
     chart = relationship("Chart", back_populates="metrics")
 
