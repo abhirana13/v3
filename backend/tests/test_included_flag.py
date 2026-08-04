@@ -87,9 +87,14 @@ def test_excluded_metric_is_kept_not_deleted(client, duckdb_path):
     assert mets["hidden_dau"]["included"] is False
 
 
-def test_default_x_axis_falls_back_when_its_dimension_is_excluded(client, duckdb_path):
-    """A saved x_axis whose dimension got excluded must degrade to a time series, not 400 —
-    otherwise the chart becomes unopenable and the change can't be undone."""
+def test_excluded_dimension_still_works_as_the_x_axis(client, duckdb_path):
+    """Excluding only removes a dimension's filter chip — it stays valid as the x-axis.
+
+    This is the whole point for a high-cardinality date dimension (install_date): you never
+    want to pick cohorts from a dropdown (the date picker drives the range), but you do want
+    to plot retention against them. Excluding it must NOT silently drop the chart back to a
+    time series.
+    """
     cid = _chart(client, x_axis="cohort")
     _seed(duckdb_path, cid)
     _put(client, cid,
@@ -100,8 +105,10 @@ def test_default_x_axis_falls_back_when_its_dimension_is_excluded(client, duckdb
     r = client.get(f"/charts/{cid}/data", params={"group_by": "", "metrics": "dau"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["x_axis"] is None                       # fell back to the time axis
-    assert {row["event_date"] for row in body["rows"]} == {"2026-06-12", "2026-06-13"}
+    assert body["x_axis"] == "cohort"                   # still pivoted on the excluded dim
+    rows = {row["cohort"]: row["dau"] for row in body["rows"]}
+    assert rows == {"D0": 220, "D1": 50}                # 100 + 120 across days, and 50
+    assert "event_date" not in body["rows"][0]
 
 
 def test_default_x_axis_falls_back_when_its_dimension_is_gone(client, duckdb_path):

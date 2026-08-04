@@ -65,6 +65,10 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   // => the backend keys rows on that dimension instead (time collapses to a filter), so the
   // x-axis becomes e.g. install_date for a cohort view. Comes from the chart's saved x_axis.
   const [xAxisDim, setXAxisDim] = useState<string | null>(null)
+  // Values for EVERY dimension, including excluded ones (which have no filter chip). Needed
+  // to tell whether the x-axis dimension holds dates — an excluded date axis must still get
+  // the date treatment, not be mistaken for unordered categories.
+  const [allDimValues, setAllDimValues] = useState<Record<string, string[]>>({})
 
   const [settingsId, setSettingsId] = useState<string | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
@@ -83,6 +87,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         const dv = await api.getDimValues(chartId)
         if (!alive) return
         setCfg(dm)
+        setAllDimValues(dv.dimensions || {})
         // `included: false` => configured but hidden here (the config page still lists it,
         // so it can be re-included). cfg keeps the full set for the save path below.
         setDimensions(dm.dimensions.filter((d) => d.included ?? true).map((d) => ({
@@ -150,10 +155,11 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   // the current query returns no rows.
   const xAxisIsDate = useMemo(() => {
     if (!xAxisDim) return false
-    const vals = dimensions.find((d) => d.key === xAxisDim)?.values ?? []
-    const seen = vals.filter((v) => v != null && v !== '')
+    // read from ALL dim values, not the (included-only) chip list — the x-axis dimension
+    // is commonly excluded precisely because its values are dates
+    const seen = (allDimValues[xAxisDim] ?? []).filter((v) => v != null && v !== '')
     return seen.length > 0 && seen.every((v) => /^\d{4}-\d{2}-\d{2}/.test(String(v)))
-  }, [xAxisDim, dimensions])
+  }, [xAxisDim, allDimValues])
 
   /* ---- fetch data whenever the query inputs change ---- */
   useEffect(() => {

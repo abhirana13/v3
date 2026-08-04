@@ -124,8 +124,10 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
           dataRecency: String(c.default_end_offset_days ?? 2),
         })
         setQuery(c.query)
-        // only included dims can be the x-axis (an excluded one isn't offered in the chart)
-        const dimNames = dm.dimensions.filter((d) => d.included ?? true).map((d) => d.name)
+        // ALL dimensions can be the x-axis, included or not: excluding only hides a dimension
+        // from the chart's filter chips. A high-cardinality date dim (install_date) is the
+        // motivating case — no chip (you'd never multi-select cohorts), but still the axis.
+        const dimNames = dm.dimensions.map((d) => d.name)
         if (dm.dimensions.length || dm.metrics.length) {
           setColumns([
             ...dm.dimensions.filter((d) => !d.derived).map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: d.value_order || 'natural', included: d.included ?? true })),

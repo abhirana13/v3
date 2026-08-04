@@ -81,7 +81,11 @@ export function ChartView(p: ChartViewProps) {
   // A date pivot (e.g. install_date) stays on the date axis — ordered, date-formatted, and
   // time transforms still make sense. Any other dimension renders as true categories.
   const catMode = xActive && !p.xAxisIsDate
+  // Options are the chart's (included) dimensions, plus whatever is currently the axis even
+  // if excluded — otherwise the select's value matches no option and it displays the wrong
+  // dimension. Keeps a saved pivot like install_date visible and switchable.
   const xAxisDims = p.dimensions.map((d) => ({ key: d.key, label: d.label }))
+  if (xDim && !xAxisDims.some((d) => d.key === xDim)) xAxisDims.unshift({ key: xDim, label: xDimObj?.label || xDim })
 
   useEffect(() => {
     if (!fullscreen) return

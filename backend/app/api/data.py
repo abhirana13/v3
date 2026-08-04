@@ -15,11 +15,15 @@ router = APIRouter(prefix="/charts", tags=["data"])
 
 
 def _usable_default_x_axis(chart) -> str | None:
-    """The chart's saved x_axis, but only while it still points at a usable dimension.
+    """The chart's saved x_axis, but only while it still points at an existing dimension.
 
-    Returns None (=> plain time series) when the saved dimension no longer exists or has
-    been excluded, so a stale default can't make the chart unopenable. Derived dimensions
-    (e.g. country_tier) are always usable.
+    Returns None (=> plain time series) when the saved dimension is GONE (e.g. a query edit
+    dropped it), so a stale default can't make the chart unopenable.
+
+    `included` is deliberately NOT required: excluding a dimension only hides it from the
+    chart's filter chips, it stays valid as the x-axis. That's the point for a high-cardinality
+    date dimension like install_date — you never want to pick cohorts from a dropdown (the
+    date picker drives the range), but you do want to plot against them.
     """
     if not chart.x_axis or chart.x_axis == chart.time_column:
         return None
@@ -27,8 +31,7 @@ def _usable_default_x_axis(chart) -> str | None:
 
     if chart.x_axis in DERIVED_NAMES:
         return chart.x_axis
-    usable = {d.name for d in chart.dimensions if d.included}
-    return chart.x_axis if chart.x_axis in usable else None
+    return chart.x_axis if chart.x_axis in {d.name for d in chart.dimensions} else None
 
 
 @router.get("/{chart_id}/dim-values")
