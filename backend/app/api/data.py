@@ -33,6 +33,11 @@ def get_chart_data(
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     granularity: Literal["day", "week", "month"] = Query(default="day"),
+    x_axis: str | None = Query(
+        default=None,
+        description="dimension to plot on the x-axis (pivots off time); omit to use the "
+        "chart's configured default, or pass the time column name to force a time series",
+    ),
     group_by: list[str] | None = Query(default=None),
     metrics: list[str] | None = Query(default=None),
     filters: str = Query(
@@ -64,6 +69,8 @@ def get_chart_data(
             from_date=from_date,
             to_date=to_date,
             granularity=granularity,
+            # explicit param wins; otherwise fall back to the chart's configured default
+            x_axis=x_axis if x_axis is not None else chart.x_axis,
             dimensions=dims_in,
             metrics=metrics_in,
             filters=parsed_filters,

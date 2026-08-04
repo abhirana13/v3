@@ -38,6 +38,12 @@ from app.schemas import DataRequest
 
 _GRANULARITY = {"day", "week", "month"}
 
+# Pivot (x-axis = a dimension) collapses the time axis into a single constant bucket so
+# all rows fold together and the chosen dimension becomes the primary grouping key. The
+# literal value is irrelevant (it's dropped from pivot output) — it only has to be
+# identical in the keyset and per-metric queries so their lookup keys line up.
+_CONST_BUCKET = "CAST('1970-01-01' AS DATE)"
+
 
 def _q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -91,13 +97,17 @@ def _build_where(req: DataRequest, time_col: str, dim_by_name: dict, exclude_dim
     return (" AND ".join(parts) if parts else "1=1", params)
 
 
-def _run_keyset(conn, chart: Chart, req: DataRequest, requested_dims: list[str]) -> list[tuple]:
+def _run_keyset(
+    conn, chart: Chart, req: DataRequest, requested_dims: list[str],
+    collapse_time: bool = False,
+) -> list[tuple]:
     table = table_name(chart.id)
     time_col = chart.time_column
     dim_by_name = {d.name: d for d in effective_dimensions(chart, _columns(conn, table))}
 
     bucket_expr = (
-        f"CAST(date_trunc('{req.granularity}', CAST({_q(time_col)} AS DATE)) AS DATE)"
+        _CONST_BUCKET if collapse_time
+        else f"CAST(date_trunc('{req.granularity}', CAST({_q(time_col)} AS DATE)) AS DATE)"
     )
     select = [f"{bucket_expr} AS _t"]
     for d_name in requested_dims:
@@ -119,6 +129,7 @@ def _run_metric(
     req: DataRequest,
     metric,
     requested_dims: list[str],
+    collapse_time: bool = False,
 ) -> dict[tuple, object]:
     """Return {(time_bucket, *eff_values): metric_value} for this metric."""
     table = table_name(chart.id)
@@ -135,7 +146,10 @@ def _run_metric(
     eff_cols = [dim_by_name[d].column_name for d in eff_dim_names]
 
     day_expr = f"CAST({_q(time_col)} AS DATE)"
-    bucket_expr = f"CAST(date_trunc('{req.granularity}', _day) AS DATE)"
+    bucket_expr = (
+        _CONST_BUCKET if collapse_time
+        else f"CAST(date_trunc('{req.granularity}', _day) AS DATE)"
+    )
     # Independent dims must not filter this metric (see module docstring).
     where, params = _build_where(req, time_col, dim_by_name, exclude_dims=indep)
 
@@ -149,11 +163,17 @@ def _run_metric(
     )
 
     outer_select = [f"{bucket_expr} AS _t"] + [_q(c) for c in eff_cols]
-    outer_group = [bucket_expr] + [_q(c) for c in eff_cols]
+    # In pivot mode the bucket is a constant literal, so group only by the effective dims
+    # (may be empty → one total row); a constant literal in SELECT needs no GROUP BY entry.
+    group_cols = (
+        [_q(c) for c in eff_cols] if collapse_time
+        else [bucket_expr] + [_q(c) for c in eff_cols]
+    )
+    group_clause = f" GROUP BY {', '.join(group_cols)}" if group_cols else ""
     sql = (
         f"SELECT {', '.join(outer_select)}, SUM(_grain) AS _value "
-        f"FROM ({inner}) _inner "
-        f"GROUP BY {', '.join(outer_group)}"
+        f"FROM ({inner}) _inner"
+        f"{group_clause}"
     )
 
     rows = conn.execute(sql, params).fetchall()
@@ -269,6 +289,19 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
         if d not in dim_by_name:
             raise ValueError(f"unknown filter dimension '{d}'")
 
+    # x-axis: None or the chart's time column => normal time series. A dimension name =>
+    # pivot: that dimension becomes the primary grouping key and time collapses to a filter
+    # (the same aggregation + independent-metric dedup runs, just keyed on the dimension
+    # instead of the time bucket — see _CONST_BUCKET). The x-axis dim leads requested_dims.
+    x_axis = req.x_axis
+    if x_axis == chart.time_column or x_axis == "":
+        x_axis = None
+    if x_axis is not None and x_axis not in dim_by_name:
+        raise ValueError(f"unknown x_axis dimension '{x_axis}'")
+    collapse_time = x_axis is not None
+    if collapse_time:
+        requested_dims = [x_axis] + [d for d in requested_dims if d != x_axis]
+
     # Split requested metrics into base (DuckDB-backed) and formula (derived).
     base_metric_names = {m for m in metric_by_name if not metric_by_name[m].formula}
     requested_formulas = [m for m in requested_metrics if metric_by_name[m].formula]
@@ -294,17 +327,19 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
                 "from_date": req.from_date,
                 "to_date": req.to_date,
                 "granularity": req.granularity,
+                "x_axis": x_axis,
                 "dimensions": requested_dims,
                 "metrics": requested_metrics,
                 "rows": [],
                 "row_count": 0,
             }
 
-        keyset_rows = _run_keyset(conn, chart, req, requested_dims)
+        keyset_rows = _run_keyset(conn, chart, req, requested_dims, collapse_time=collapse_time)
         metric_lookups: dict[str, dict] = {}
         for m_name in needed_base:
             metric_lookups[m_name] = _run_metric(
-                conn, chart, req, metric_by_name[m_name], requested_dims
+                conn, chart, req, metric_by_name[m_name], requested_dims,
+                collapse_time=collapse_time,
             )
     finally:
         conn.close()
@@ -321,7 +356,9 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
     for kr in keyset_rows:
         time_bucket = kr[0]
         req_dim_values = list(kr[1:])
-        out: dict = {chart.time_column: time_bucket}
+        # In pivot mode the x-axis is the chosen dimension (it leads requested_dims); the
+        # collapsed time bucket is a meaningless constant, so it's omitted from the row.
+        out: dict = {} if collapse_time else {chart.time_column: time_bucket}
         for i, d_name in enumerate(requested_dims):
             out[dim_by_name[d_name].column_name] = req_dim_values[i]
 
@@ -356,6 +393,7 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
         "from_date": req.from_date,
         "to_date": req.to_date,
         "granularity": req.granularity,
+        "x_axis": x_axis,
         "dimensions": requested_dims,
         "metrics": requested_metrics,
         "rows": output_rows,

@@ -41,6 +41,10 @@ class Chart(Base):
 
     time_column = Column(String(128), nullable=True)
     date_format = Column(String(64), nullable=False, default="%Y-%m-%d", server_default="%Y-%m-%d")
+    # Default chart-view x-axis. Null (or == time_column) => plot over the time bucket
+    # (normal time series). Set to a dimension name => the chart view/serving pivots to
+    # plot that dimension on the x-axis, collapsing time to a filter. See serving.serve_data.
+    x_axis = Column(String(128), nullable=True)
 
     variables = Column(JSON, nullable=False, default=dict, server_default="{}")
     # sha256 of (query + variables) the cached aggregates were last built from.

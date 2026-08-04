@@ -37,6 +37,9 @@ class ChartBase(BaseModel):
     time_column: str | None = None
     date_format: str = "%Y-%m-%d"
     variables: dict[str, Any] = Field(default_factory=dict)
+    # Default x-axis for the chart view. None (or == time_column) => plot over time.
+    # A dimension name => pivot the x-axis onto that dimension (time collapses to a filter).
+    x_axis: str | None = None
 
 
 class ChartCreate(ChartBase):
@@ -61,6 +64,7 @@ class ChartUpdate(BaseModel):
     time_column: str | None = None
     date_format: str | None = None
     variables: dict[str, Any] | None = None
+    x_axis: str | None = None
 
 
 class ChartRead(ChartBase):
@@ -157,6 +161,8 @@ class DimsMetricsOut(BaseModel):
     time_column: str | None
     date_format: str | None
     default_end_offset_days: int = 2
+    # chart's default x-axis (None => the time column; a dim name => pivot)
+    x_axis: str | None = None
     dimensions: list[DimensionOut]
     metrics: list[MetricOut]
 
@@ -180,6 +186,9 @@ class DataRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
     granularity: Literal["day", "week", "month"] = "day"
+    # x-axis: None (or the chart's time_column) => normal time series; a dimension name =>
+    # pivot the x-axis onto that dimension, collapsing time to a filter (serve_data).
+    x_axis: str | None = None
     dimensions: list[str] | None = None  # None = group by all configured dims
     metrics: list[str] | None = None  # None = include all configured metrics
     # dimension values can be non-string (e.g. an integer id column like game_id used as a
@@ -200,6 +209,9 @@ class DataResponse(BaseModel):
     from_date: date | None
     to_date: date | None
     granularity: str
+    # echoes the resolved x-axis: None => time series (x = time_column); otherwise the
+    # dimension name the rows are keyed on (so the frontend knows which field is the axis).
+    x_axis: str | None = None
     dimensions: list[str]
     metrics: list[str]
     rows: list[dict[str, Any]]
