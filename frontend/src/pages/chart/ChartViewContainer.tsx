@@ -61,6 +61,10 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   const [dataReloadKey, setDataReloadKey] = useState(0)
   const [endOffset, setEndOffset] = useState(2) // chart data ends this many days before today
   const [freshness, setFreshness] = useState<Freshness | null>(null)
+  // Pivot x-axis: null => plot over the time column (normal time series). A dimension name
+  // => the backend keys rows on that dimension instead (time collapses to a filter), so the
+  // x-axis becomes e.g. install_date for a cohort view. Comes from the chart's saved x_axis.
+  const [xAxisDim, setXAxisDim] = useState<string | null>(null)
 
   const [settingsId, setSettingsId] = useState<string | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
@@ -94,6 +98,8 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         // open at the chart's saved default recency (falls back to 2)
         const off = dm.default_end_offset_days ?? 2
         setEndOffset(off)
+        // saved x-axis: only a real dimension pivots (the time column means time series)
+        setXAxisDim(dm.x_axis && dm.x_axis !== dm.time_column ? dm.x_axis : null)
         // window end = today; the recency offset caps it (recencyEnd) so the offset, not
         // a stale end, controls how recent the data is
         setDateRange({ start: dv.date_min || '', end: todayMinus(0) })
@@ -136,6 +142,17 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     return dateRange.end && dateRange.end < cap ? dateRange.end : cap
   }, [dateRange.end, endOffset])
 
+  // Is the pivot x-axis a DATE dimension (e.g. install_date)? Then its axis can be seeded
+  // with the full picked window like a time axis, so filtering a series (e.g. one tenure)
+  // never shrinks the axis. Read from the dimension's own values, so it's known even when
+  // the current query returns no rows.
+  const xAxisIsDate = useMemo(() => {
+    if (!xAxisDim) return false
+    const vals = dimensions.find((d) => d.key === xAxisDim)?.values ?? []
+    const seen = vals.filter((v) => v != null && v !== '')
+    return seen.length > 0 && seen.every((v) => /^\d{4}-\d{2}-\d{2}/.test(String(v)))
+  }, [xAxisDim, dimensions])
+
   /* ---- fetch data whenever the query inputs change ---- */
   useEffect(() => {
     if (!cfg || !cfg.time_column) return
@@ -152,7 +169,9 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       return
     }
 
-    const splitDims = dimensions.filter((d) => d.split)
+    // In pivot mode the x-axis dimension is the row key, not a series split — exclude it
+    // from the split set so it doesn't also become a series.
+    const splitDims = dimensions.filter((d) => d.split && d.key !== xAxisDim)
     const groupBy = splitDims.map((d) => d.key)
 
     // cross-dimension cap: product of each split dim's effective (post-filter) cardinality
@@ -172,19 +191,41 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     setLoading(true); setError(null)
     api.getData(chartId, {
       granularity: GRAN[granularity], from: dateRange.start || null, to: recencyEnd || null,
-      metrics: names, groupBy, filters, hideZero,
+      metrics: names, groupBy, filters, hideZero, xAxis: xAxisDim,
     }).then((resp) => {
       if (token !== fetchToken.current) return
-      const tc = cfg.time_column as string
-      // full bucket series for the selected window, so the x-axis honors the chosen
-      // start/end with gaps where there's no data (falls back to data rows if unset)
-      const buckets = dateBuckets(dateRange.start, recencyEnd, GRAN[granularity])
+      // Row key: the pivot dimension's column when pivoting, else the time column.
+      const colByNameAll = new Map(cfg.dimensions.map((d) => [d.name, d.column_name]))
+      const tc = xAxisDim ? (colByNameAll.get(xAxisDim) || xAxisDim) : (cfg.time_column as string)
+      // Seed the x-axis with the full selected window so it always spans the picked date
+      // range (gaps where there's no data) instead of cropping to whatever rows came back.
+      // Without this, filtering e.g. days_since_install=7 would shrink the axis to only the
+      // cohorts that have a D7 row. A pivot on a DATE dimension (install_date) can be
+      // generated the same way; the backend doesn't granularity-bucket a pivot dimension,
+      // so its values are raw days. A non-date pivot dimension has no generable range —
+      // its x-values come from the data.
+      const buckets = !xAxisDim
+        ? dateBuckets(dateRange.start, recencyEnd, GRAN[granularity])
+        : xAxisIsDate
+          ? dateBuckets(dateRange.start, recencyEnd, 'day')
+          : []
+
+      // Pivoting on a date dimension: the date filter applies to the chart's TIME column,
+      // not the x-axis dimension, so rows outside the picked window can come back (e.g. a
+      // cohort that installed before the window but was active inside it). Clamp to the
+      // seeded window so the axis is exactly the picked range.
+      const inWindow = new Set(buckets)
+      const plotRows = (xAxisDim && xAxisIsDate && inWindow.size)
+        ? resp.rows.filter((r) => inWindow.has(String(r[tc])))
+        : resp.rows
 
       if (splitDims.length === 0) {
         // time-only aggregate: one series per visible metric (unchanged behavior)
         setChartSeries(visibleMetrics.map((m) => ({ key: m.key, label: m.name, color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name })))
-        const byT = new Map(resp.rows.map((r) => [String(r[tc]), r]))
-        const dates = buckets.length ? buckets : resp.rows.map((r) => String(r[tc]))
+        const byT = new Map(plotRows.map((r) => [String(r[tc]), r]))
+        const dates = buckets.length
+          ? buckets
+          : [...new Set(plotRows.map((r) => String(r[tc])))].sort()
         setChartData(dates.map((d) => {
           const r = byT.get(d)
           const row: ChartRow = { date: d }
@@ -205,7 +246,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
 
       const order: string[] = []
       const seen = new Set<string>()
-      for (const r of resp.rows) { const k = comboOf(r); if (!seen.has(k)) { seen.add(k); order.push(k) } }
+      for (const r of plotRows) { const k = comboOf(r); if (!seen.has(k)) { seen.add(k); order.push(k) } }
 
       const series: UISeries[] = []
       let ci = 0
@@ -216,7 +257,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
 
       const byDate = new Map<string, ChartRow>()
       for (const d of buckets) byDate.set(d, { date: d }) // seed the full window (gaps where no data)
-      for (const r of resp.rows) {
+      for (const r of plotRows) {
         const date = String(r[tc]); const combo = comboOf(r)
         let row = byDate.get(date)
         if (!row) { row = { date }; byDate.set(date, row) }
@@ -228,7 +269,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       if (token !== fetchToken.current) return
       setError(String(e.message || e)); setLoading(false)
     })
-  }, [cfg, chartId, visibleMetrics, granularity, dateRange.start, recencyEnd, filters, hideZero, splitKey, dataReloadKey])
+  }, [cfg, chartId, visibleMetrics, granularity, dateRange.start, recencyEnd, filters, hideZero, splitKey, dataReloadKey, xAxisDim, xAxisIsDate])
 
   /* ---- dimension callbacks ---- */
   const onDimensionToggleValue = useCallback((key: string, val: string) => {

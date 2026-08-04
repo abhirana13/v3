@@ -31,6 +31,7 @@ export interface ChartFull {
   cache_strategy: string
   time_column: string | null
   date_format: string
+  x_axis: string | null
   variables: Record<string, string | string[]>
 }
 
@@ -61,6 +62,7 @@ export interface ChartWriteBody {
   cache_strategy?: string
   time_column?: string | null
   date_format?: string
+  x_axis?: string | null
   variables?: Record<string, string | string[]>
 }
 
@@ -88,6 +90,8 @@ export interface DimsMetrics {
   time_column: string | null
   date_format: string | null
   default_end_offset_days?: number
+  // chart's default x-axis: null => the time column (time series); a dim name => pivot
+  x_axis?: string | null
   dimensions: DimensionCfg[]
   metrics: MetricCfg[]
 }
@@ -101,6 +105,9 @@ export interface DimValues {
 export interface DataResponse {
   chart_id: number
   granularity: string
+  // resolved x-axis: null => rows are keyed on the time column; otherwise the dimension
+  // name the rows are keyed on (pivot mode — rows carry no time column)
+  x_axis?: string | null
   dimensions: string[]
   metrics: string[]
   rows: Record<string, number | string | null>[]
@@ -147,6 +154,9 @@ export interface DataQuery {
   groupBy: string[] // dimensions to split by (empty => time-only aggregate)
   filters: Record<string, string[]>
   hideZero: boolean
+  // x-axis dimension: omit to use the chart's configured default; the time column name
+  // forces a plain time series; any other dimension pivots the x-axis onto it
+  xAxis?: string | null
 }
 
 // ---------- dashboards ----------

@@ -29,6 +29,8 @@ function dataQuery(q: DataQuery): string {
   // empty one so the backend stays time-only (omitting it groups by ALL dims).
   if (q.groupBy.length) for (const d of q.groupBy) parts.push(`group_by=${encodeURIComponent(d)}`)
   else parts.push('group_by=')
+  // x_axis: only sent when set — omitting it lets the backend apply the chart's default
+  if (q.xAxis) parts.push(`x_axis=${encodeURIComponent(q.xAxis)}`)
   for (const m of q.metrics) parts.push(`metrics=${encodeURIComponent(m)}`)
   if (Object.keys(q.filters).length) parts.push(`filters=${encodeURIComponent(JSON.stringify(q.filters))}`)
   if (q.hideZero) parts.push('hide_zero=true')

@@ -130,7 +130,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
             ...dm.dimensions.filter((d) => !d.derived).map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: d.value_order || 'natural', included: true })),
             ...dm.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: m.independent_dimensions || [], formula: m.formula || null, decimals: m.decimals ?? 0, yAxis: m.y_axis || 'primary', unit: m.unit || null, included: true })),
           ])
-          setDims((s) => ({ ...s, timeColumn: dm.time_column || '', xAxis: dm.time_column || dimNames[0] || '', dateFormat: dm.date_format || '%Y-%m-%d', axisOptions: [dm.time_column || '', ...dimNames].filter(Boolean), timeOptions: [dm.time_column || ''].filter(Boolean) }))
+          setDims((s) => ({ ...s, timeColumn: dm.time_column || '', xAxis: dm.x_axis || dm.time_column || dimNames[0] || '', dateFormat: dm.date_format || '%Y-%m-%d', axisOptions: [dm.time_column || '', ...dimNames].filter(Boolean), timeOptions: [dm.time_column || ''].filter(Boolean) }))
           setGenerated(true)
         }
         const rr = await api.backpopRuns(target).catch(() => [])
@@ -161,8 +161,12 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     default_date_range_days: labelToDays(cache.defaultDateRange),
     default_end_offset_days: Math.max(0, parseInt(cache.dataRecency || '2', 10)),
     cur_date_behavior: curDateValue(cache.curDateBehaviour), cache_strategy: 'append',
-    date_format: dims.dateFormat, variables: rowsToVars(variables),
-  }), [meta, query, cache, dims.dateFormat, variables])
+    date_format: dims.dateFormat,
+    // XAxis: the time column means "plot over time" — persist null so the chart stays a
+    // time series; any other dimension is saved as the chart's default pivot axis.
+    x_axis: dims.xAxis && dims.xAxis !== dims.timeColumn ? dims.xAxis : null,
+    variables: rowsToVars(variables),
+  }), [meta, query, cache, dims.dateFormat, dims.xAxis, dims.timeColumn, variables])
 
   /* ensure the chart exists/updated; returns its id (or null on error already surfaced) */
   const ensureSaved = async (): Promise<number | null> => {
@@ -195,7 +199,14 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
         ...r.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: [], included: true })),
         ...keptFormulas,
       ])
-      setDims((s) => ({ ...s, timeColumn: r.time_column || '', xAxis: r.time_column || dimNames[0] || '', axisOptions: [r.time_column || '', ...dimNames].filter(Boolean), timeOptions: [r.time_column || ''].filter(Boolean) }))
+      // keep a chosen pivot x-axis if the re-introspected query still has that dimension,
+      // so regenerating columns doesn't silently reset the chart back to a time series
+      setDims((s) => ({
+        ...s, timeColumn: r.time_column || '',
+        xAxis: s.xAxis && dimNames.includes(s.xAxis) ? s.xAxis : (r.time_column || dimNames[0] || ''),
+        axisOptions: [r.time_column || '', ...dimNames].filter(Boolean),
+        timeOptions: [r.time_column || ''].filter(Boolean),
+      }))
       setGenerated(true)
     } catch (e: any) {
       const msg = String(e.message || e)
