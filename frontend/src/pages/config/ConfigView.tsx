@@ -30,6 +30,7 @@ export interface ConfigViewProps {
   dims: { xAxis: string; timeColumn: string; dateFormat: string; axisOptions: string[]; timeOptions: string[]; dateFormatOptions: string[] }
   onAxisFieldChange: (patch: Record<string, string>) => void
   columns: ConfigColumn[]; onColumnChange: (name: string, patch: Partial<ConfigColumn>) => void
+  onReorderColumns: (names: string[]) => void
   onBack: () => void
   onDelete?: () => void
   onSaveDraft: () => void; onSaveBackpopulate: (r: { start: string; end: string; force: boolean }) => void
@@ -121,6 +122,7 @@ export function ConfigView(p: ConfigViewProps) {
                 xAxis={p.dims.xAxis} timeColumn={p.dims.timeColumn} dateFormat={p.dims.dateFormat}
                 axisOptions={p.dims.axisOptions} timeOptions={p.dims.timeOptions} dateFormatOptions={p.dims.dateFormatOptions}
                 onAxisFieldChange={p.onAxisFieldChange} columns={p.columns} onColumnChange={p.onColumnChange}
+                onReorder={p.onReorderColumns}
               />
             </div>
           )}

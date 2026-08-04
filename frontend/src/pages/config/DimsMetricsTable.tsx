@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { ConfigField, ConfigSelect, CIc } from './fields'
 import { IndependentPicker } from './IndependentPicker'
 
@@ -17,13 +18,27 @@ export interface ConfigColumn {
 }
 
 /* --------------------------------------------------------- DimsMetricsTable */
-export function DimsMetricsTable({ xAxis, timeColumn, dateFormat, axisOptions, timeOptions, dateFormatOptions, onAxisFieldChange, columns, onColumnChange }: {
+export function DimsMetricsTable({ xAxis, timeColumn, dateFormat, axisOptions, timeOptions, dateFormatOptions, onAxisFieldChange, columns, onColumnChange, onReorder }: {
   xAxis: string; timeColumn: string; dateFormat: string
   axisOptions: string[]; timeOptions: string[]; dateFormatOptions: string[]
   onAxisFieldChange: (patch: Record<string, string>) => void
   columns: ConfigColumn[]; onColumnChange: (name: string, patch: Partial<ConfigColumn>) => void
+  onReorder: (names: string[]) => void
 }) {
   const dimNames = columns.filter((d) => d.classification === 'Dimension').map((d) => d.name)
+  const [drag, setDrag] = useState<number | null>(null)
+  // Drag-to-reorder by the grip. Order is saved as display_order (by array position), which
+  // sets the order dimensions/metrics load in. Moves are confined to rows of the SAME
+  // classification: dimensions and metrics persist as separate lists, so letting a metric
+  // cross into the dimensions block would just snap back on reload.
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= columns.length || from === to) return
+    if (columns[from].classification !== columns[to].classification) return
+    const a = [...columns]
+    const [x] = a.splice(from, 1)
+    a.splice(to, 0, x)
+    onReorder(a.map((c) => c.name))
+  }
   return (
     <div>
       <div className="mb-4 grid grid-cols-3 gap-x-6">
@@ -45,9 +60,14 @@ export function DimsMetricsTable({ xAxis, timeColumn, dateFormat, axisOptions, t
             </tr>
           </thead>
           <tbody>
-            {columns.map((c) => (
-              <tr key={c.name} className="border-t border-slate-100 hover:bg-slate-50/60">
-                <td className="px-3 py-2 text-slate-300"><CIc.grip /></td>
+            {columns.map((c, i) => (
+              <tr key={c.name}
+                onDragEnter={() => { if (drag != null && drag !== i) { move(drag, i); setDrag(i) } }}
+                onDragOver={(e) => e.preventDefault()}
+                className={'border-t border-slate-100 ' + (drag === i ? 'bg-sky-50' : 'hover:bg-slate-50/60')}>
+                {/* only the grip starts a drag, so the row's selects/buttons stay clickable */}
+                <td draggable onDragStart={() => setDrag(i)} onDragEnd={() => setDrag(null)}
+                  title="Drag to reorder" className="cursor-grab px-3 py-2 text-slate-300 hover:text-slate-500 active:cursor-grabbing"><CIc.grip /></td>
                 <td className="px-3 py-2 font-mono font-medium text-slate-700">
                   {c.name}
                   {c.classification === 'Metric' && c.formula ? (

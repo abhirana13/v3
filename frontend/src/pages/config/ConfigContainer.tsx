@@ -299,6 +299,17 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     setColumns((cs) => cs.map((c) => c.name === name ? { ...c, ...patch } : c))
   }, [])
 
+  // Drag-reorder from the table: reorder by name, keeping any column the list didn't
+  // mention (defensive — the payload's array position becomes display_order on save).
+  const onReorderColumns = useCallback((names: string[]) => {
+    setColumns((cs) => {
+      const byName = new Map(cs.map((c) => [c.name, c]))
+      const next = names.map((n) => byName.get(n)).filter((c): c is ConfigColumn => !!c)
+      for (const c of cs) if (!names.includes(c.name)) next.push(c)
+      return next
+    })
+  }, [])
+
   // UI-only preview: toggling certified shows the number it WILL get; the backend
   // only re-numbers on save. The saved number's range encodes the saved cert state.
   const savedCert = meta.number != null ? meta.number < 1000 : null
@@ -336,7 +347,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       }}
       query={query} onQueryChange={setQuery} queryTheme={queryTheme} onQueryThemeChange={setQueryTheme} queryModeWarning={queryModeWarning}
       onGenerate={onGenerate} generated={generated} generating={generating} generateError={generateError}
-      dims={dims} onAxisFieldChange={(patch) => setDims((d) => ({ ...d, ...patch }))} columns={columns} onColumnChange={onColumnChange}
+      dims={dims} onAxisFieldChange={(patch) => setDims((d) => ({ ...d, ...patch }))} columns={columns} onColumnChange={onColumnChange} onReorderColumns={onReorderColumns}
       onBack={onBack} onDelete={savedId != null ? onDelete : undefined}
       onSaveDraft={onSaveDraft} onSaveBackpopulate={onSaveBackpopulate} backpopDefaults={backpopDefaults}
       saving={saving} saveError={saveError} saveOk={saveOk}
