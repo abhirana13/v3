@@ -169,7 +169,7 @@ export function ChartView(p: ChartViewProps) {
   ) : p.chartData.length === 0 ? (
     <div className="flex h-full items-center justify-center text-[13px] text-slate-400">No data in this range.</div>
   ) : (
-    <TimeSeriesChart data={displayData} series={displaySeries} seriesType={seriesType} percentStacked={pct && !catMode} granularity={p.granularity} display={opts} categorical={catMode} xLabel={xActive ? (xDimObj?.label || 'Dimension').toUpperCase() : 'TIME'} yLabelPrimary={displaySeries.find((s) => s.axis === 'primary')?.label} pngRef={pngRef} />
+    <TimeSeriesChart data={displayData} series={displaySeries} seriesType={seriesType} percentStacked={pct && !catMode} granularity={p.granularity} display={opts} categorical={catMode} xLabel={xActive ? (xDimObj?.label || xDim).toUpperCase() : 'TIME'} yLabelPrimary={displaySeries.find((s) => s.axis === 'primary')?.label} pngRef={pngRef} />
   )
 
   return (

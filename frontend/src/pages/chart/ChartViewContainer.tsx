@@ -4,6 +4,7 @@ import type { DimsMetrics, Freshness, MetricCfg } from '../../api/types'
 import { ChartView } from './ChartView'
 import type { MetricDraft } from './MetricSettingsModal'
 import type { ChartRow, UIDimension, UIMetric, UISeries } from '../../components/types'
+import { decodeSelection, encodeSelection, loadChartView, saveChartView } from './viewState'
 
 const PALETTE = ['#38bdf8', '#a855f7', '#16a34a', '#f59e0b', '#ef4444', '#14b8a6', '#6366f1', '#ec4899', '#0ea5e9', '#84cc16']
 const GRAN: Record<string, string> = { Day: 'day', Week: 'week', Month: 'month' }
@@ -76,46 +77,88 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
 
   const title = charts.find((c) => c.id === chartId)?.name || `Chart ${chartId}`
   const fetchToken = useRef(0)
+  // false until this chart's saved state has been applied, so the persist effect below
+  // can't overwrite it with the freshly-mounted defaults before restore happens
+  const hydrated = useRef(false)
 
   /* ---- load config + dimension values + date extent on chart change ---- */
   useEffect(() => {
     let alive = true
+    hydrated.current = false // don't persist until this chart's state is restored
     setError(null); setCfg(null); setMetrics([]); setDimensions([]); setChartData([])
     ;(async () => {
       try {
         const dm = await api.getDimsMetrics(chartId)
         const dv = await api.getDimValues(chartId)
         if (!alive) return
+        // Restore what the user last had on this chart (browser-only, see viewState.ts).
+        // Everything below falls back to the chart's configured defaults when absent, and
+        // anything naming a dimension/metric/value that no longer exists is dropped.
+        const saved = loadChartView(chartId)
         setCfg(dm)
         setAllDimValues(dv.dimensions || {})
         // `included: false` => configured but hidden here (the config page still lists it,
         // so it can be re-included). cfg keeps the full set for the save path below.
-        setDimensions(dm.dimensions.filter((d) => d.included ?? true).map((d) => ({
-          key: d.name, label: d.name,
-          values: dv.dimensions[d.name] || [],
-          selected: dv.dimensions[d.name] || [],
-          split: false,
-        })))
+        setDimensions(dm.dimensions.filter((d) => d.included ?? true).map((d) => {
+          const values = dv.dimensions[d.name] || []
+          const sd = saved?.dims?.[d.name]
+          return {
+            key: d.name, label: d.name, values,
+            selected: decodeSelection(sd, values),
+            split: !!sd?.split,
+          }
+        }))
+        const savedVisible = saved?.metrics?.length
+          ? new Set(saved.metrics.filter((n) => dm.metrics.some((m) => m.name === n)))
+          : null
         setMetrics(dm.metrics.filter((m) => m.included ?? true).map((m, i) => ({
           id: m.name, name: m.name, key: m.name, color: PALETTE[i % PALETTE.length],
-          visible: i === 0, columnName: m.column_name,
+          // restored visibility, else the default of showing the first metric
+          visible: savedVisible && savedVisible.size ? savedVisible.has(m.name) : i === 0,
+          columnName: m.column_name,
           formula: m.formula || '', independentFields: m.independent_dimensions || [],
           axis: m.y_axis, decimals: m.decimals, unit: m.unit || 'None',
         })))
+        if (saved?.granularity) setGranularity(saved.granularity)
+        if (saved?.chartType) setChartType(saved.chartType)
+        if (saved?.hideZero != null) setHideZero(saved.hideZero)
         // open at the chart's saved default recency (falls back to 2)
-        const off = dm.default_end_offset_days ?? 2
-        setEndOffset(off)
+        setEndOffset(saved?.endOffset ?? (dm.default_end_offset_days ?? 2))
         // saved x-axis: only a real dimension pivots (the time column means time series)
-        setXAxisDim(dm.x_axis && dm.x_axis !== dm.time_column ? dm.x_axis : null)
+        const chartDefaultX = dm.x_axis && dm.x_axis !== dm.time_column ? dm.x_axis : null
+        const restoredX = saved?.xAxis
+        // a remembered pivot dimension that's since been dropped falls back to the default
+        setXAxisDim(
+          restoredX !== undefined && (restoredX === null || dm.dimensions.some((d) => d.name === restoredX))
+            ? restoredX
+            : chartDefaultX,
+        )
         // window end = today; the recency offset caps it (recencyEnd) so the offset, not
         // a stale end, controls how recent the data is
-        setDateRange({ start: dv.date_min || '', end: todayMinus(0) })
+        setDateRange({ start: saved?.from ?? (dv.date_min || ''), end: saved?.to ?? todayMinus(0) })
+        hydrated.current = true
       } catch (e: any) {
         if (alive) setError(String(e.message || e))
       }
     })()
     return () => { alive = false }
   }, [chartId])
+
+  /* ---- remember this chart's view state in the browser (see viewState.ts) ----
+     Runs only after hydration, so a fresh mount can't clobber the saved state with
+     defaults. Nothing here touches the backend. */
+  useEffect(() => {
+    if (!hydrated.current) return
+    saveChartView(chartId, {
+      granularity, chartType, hideZero, endOffset,
+      from: dateRange.start, to: dateRange.end,
+      xAxis: xAxisDim,
+      dims: Object.fromEntries(
+        dimensions.map((d) => [d.key, { split: d.split, sel: encodeSelection(d.selected, d.values) }]),
+      ),
+      metrics: metrics.filter((m) => m.visible).map((m) => m.name),
+    })
+  }, [chartId, granularity, chartType, hideZero, endOffset, dateRange.start, dateRange.end, xAxisDim, dimensions, metrics])
 
   /* ---- freshness (data recency + last backpop) for the header ---- */
   useEffect(() => {
