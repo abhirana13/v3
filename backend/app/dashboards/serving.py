@@ -13,7 +13,7 @@ formula evaluation — a widget always shows the same numbers as its source char
 
 from datetime import date, timedelta
 
-from app.backpop.duckdb_writer import cache_columns
+from app.backpop.duckdb_writer import cache_present_columns
 from app.dashboards.models import Dashboard, Widget
 from app.dashboards.schemas import ChartWidgetConfig, NumberWidgetConfig
 from app.derived_dims import effective_dimensions
@@ -45,7 +45,7 @@ def merge_filters(chart: Chart, global_filters: dict, widget_filters: dict) -> t
     came up empty — the correct result is NO rows (serve_data would silently drop
     an empty filter list, which would wrongly widen back to everything).
     """
-    servable = {d.name for d in effective_dimensions(chart, cache_columns(chart.id))}
+    servable = {d.name for d in effective_dimensions(chart, cache_present_columns(chart))}
 
     merged: dict[str, list] = {}
     for dim, values in (global_filters or {}).items():
@@ -86,7 +86,7 @@ def resolve_window(
 def _dim_columns(chart: Chart, dim_names: list[str]) -> list[str]:
     """Row keys are COLUMN names while group_by uses dimension NAMES — hand the
     frontend the mapping so it never has to guess row-key order."""
-    by_name = {d.name: d.column_name for d in effective_dimensions(chart, cache_columns(chart.id))}
+    by_name = {d.name: d.column_name for d in effective_dimensions(chart, cache_present_columns(chart))}
     return [by_name.get(d, d) for d in dim_names]
 
 
@@ -124,7 +124,7 @@ def chart_widget_data(
     # Global "split" cuts (dashboard filter-bar chips the viewer unchecked) add to
     # this widget's own group_by — but only dimensions the source chart actually has
     # (others simply don't apply here, same rule as filters). Deduped, widget's first.
-    servable = {d.name for d in effective_dimensions(chart, cache_columns(chart.id))}
+    servable = {d.name for d in effective_dimensions(chart, cache_present_columns(chart))}
     group_by = list(cfg.group_by)
     for d in extra_group_by:
         if d in servable and d not in group_by:

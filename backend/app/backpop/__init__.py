@@ -311,6 +311,14 @@ def _run_batches(
                     chart.cache_latest_date = emax
             except Exception as e:
                 print(f"[backpop] chart {chart.id}: freshness mirror skipped ({e})", flush=True)
+        # Same idea for the cache's column list, which the config page and dashboard
+        # dimension resolution need on every request (see cache_present_columns). Mirrored
+        # AFTER materialize_derived above so the derived columns it just wrote are included.
+        if batches_done:
+            try:
+                chart.cache_columns = sorted(duckdb_writer.cache_columns(chart.id))
+            except Exception as e:
+                print(f"[backpop] chart {chart.id}: column mirror skipped ({e})", flush=True)
         run.completed_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(run)

@@ -6,12 +6,23 @@ import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.connections.duckdb import is_lock_error
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.schemas import DataRequest, DataResponse
 from app.serving import dimension_values, serve_data
 
 router = APIRouter(prefix="/charts", tags=["data"])
+
+# A backpop holds DuckDB's single write lock for seconds at a time, and the lock covers the
+# whole file — so any chart's backpop can briefly lock out reads for every chart. 503 +
+# Retry-After says "transient, come back", which is what a client should act on; the old
+# behaviour surfaced this as a 500 (or, worse, as a "rebuild your cache" 400).
+_BUSY = "the aggregate cache is being written by a backpopulation right now — retry in a few seconds"
+
+
+def _busy() -> HTTPException:
+    return HTTPException(status_code=503, detail=_BUSY, headers={"Retry-After": "5"})
 
 
 def _usable_default_x_axis(chart) -> str | None:
@@ -44,7 +55,12 @@ def get_dim_values(
     chart = crud_charts.get(db, chart_id)
     if chart is None:
         raise HTTPException(status_code=404, detail="chart not found")
-    return dimension_values(chart, from_date, to_date)
+    try:
+        return dimension_values(chart, from_date, to_date)
+    except duckdb.Error as e:
+        if is_lock_error(e):
+            raise _busy()
+        raise
 
 
 @router.get("/{chart_id}/data", response_model=DataResponse)
@@ -108,6 +124,11 @@ def get_chart_data(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except duckdb.Error as e:
+        # A lock conflict is a backpop writing, not a broken cache — it must NOT reach the
+        # "rebuild this chart" message below, which would have the user destroy a healthy
+        # cache to fix a condition that clears itself in seconds.
+        if is_lock_error(e):
+            raise _busy()
         # e.g. a metric column cached as VARCHAR (aggregation binder error) — the
         # cache table's types are stale/poisoned. Surface an actionable 400 with a
         # rebuild hint instead of a blank 500.

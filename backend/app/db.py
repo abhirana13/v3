@@ -43,6 +43,8 @@ def ensure_schema(eng=None) -> None:
             conn.execute(text("ALTER TABLE charts ADD COLUMN x_axis VARCHAR"))
         if "cache_latest_date" not in cols:
             conn.execute(text("ALTER TABLE charts ADD COLUMN cache_latest_date DATE"))
+        if "cache_columns" not in cols:
+            conn.execute(text("ALTER TABLE charts ADD COLUMN cache_columns JSON"))
         if "default_end_offset_days" not in cols:
             conn.execute(
                 text(
@@ -133,24 +135,31 @@ def ensure_schema(eng=None) -> None:
         if pending:
             session.commit()
 
-    # Backfill cache_latest_date from the cache for any chart that doesn't have it yet, so
-    # the home page can report freshness without opening DuckDB (see charts_overview). The
-    # worker mirrors this value after every backpop; this covers charts whose cache predates
-    # the column.
+    # Backfill the two Postgres mirrors of DuckDB state for any chart that doesn't have them
+    # yet, so request paths never open the cache file (see charts_overview and
+    # duckdb_writer.cache_present_columns):
+    #   * cache_latest_date — freshness for the home page
+    #   * cache_columns     — which backend-derived dimensions apply, for the config page
+    # The worker refreshes both after every backpop; this covers charts whose cache predates
+    # the columns.
     #
     # Keyed on "value still missing", NOT on "just added the column": a one-shot gate can be
     # consumed by a run where the seed doesn't complete, and then never fires again. This
     # form self-heals and costs one read-only DuckDB open at startup only while something is
     # still unseeded. Uses ONE connection for every chart, not one per chart.
     with Session(eng) as session:
-        unseeded = (
-            session.query(Chart)
+        need_date = [
+            (c.id, c.time_column)
+            for c in session.query(Chart)
             .filter(Chart.cache_latest_date.is_(None), Chart.time_column.isnot(None))
             .all()
-        )
-        if not unseeded:
-            return
-        ids_cols = [(c.id, c.time_column) for c in unseeded]
+        ]
+        need_cols = [
+            c.id
+            for c in session.query(Chart).filter(Chart.cache_columns.is_(None)).all()
+        ]
+    if not need_date and not need_cols:
+        return
 
     from app.backpop.duckdb_writer import table_name
     from app.connections import duckdb as duckdb_conn
@@ -158,7 +167,7 @@ def ensure_schema(eng=None) -> None:
     try:
         conn = duckdb_conn.get_connection(read_only=True)
     except Exception as e:  # cache locked/unopenable — retried next startup, or by a backpop
-        print(f"[schema] freshness seed skipped ({type(e).__name__}: {e})", flush=True)
+        print(f"[schema] cache mirror seed skipped ({type(e).__name__}: {e})", flush=True)
         return
     try:
         present = {
@@ -167,7 +176,7 @@ def ensure_schema(eng=None) -> None:
             ).fetchall()
         }
         found: dict[int, object] = {}
-        for cid, time_col in ids_cols:
+        for cid, time_col in need_date:
             if table_name(cid) not in present:
                 continue  # no cache built yet — the first backpop will set it
             try:
@@ -179,12 +188,34 @@ def ensure_schema(eng=None) -> None:
                 continue
             if row and row[0] is not None:
                 found[cid] = row[0]
+
+        found_cols: dict[int, list[str]] = {}
+        for cid in need_cols:
+            if table_name(cid) not in present:
+                continue
+            try:
+                rows = conn.execute(f'PRAGMA table_info("{table_name(cid)}")').fetchall()
+            except Exception as e:
+                print(f"[schema] chart {cid}: column seed failed ({e})", flush=True)
+                continue
+            found_cols[cid] = sorted(r[1] for r in rows)
     finally:
         conn.close()
 
-    if found:
+    if found or found_cols:
         with Session(eng) as session:
-            for c in session.query(Chart).filter(Chart.id.in_(found)).all():
-                c.cache_latest_date = found[c.id]
+            for c in (
+                session.query(Chart)
+                .filter(Chart.id.in_(set(found) | set(found_cols)))
+                .all()
+            ):
+                if c.id in found:
+                    c.cache_latest_date = found[c.id]
+                if c.id in found_cols:
+                    c.cache_columns = found_cols[c.id]
             session.commit()
-        print(f"[schema] seeded freshness for {len(found)} chart(s)", flush=True)
+        print(
+            f"[schema] seeded freshness for {len(found)} chart(s), "
+            f"cache columns for {len(found_cols)} chart(s)",
+            flush=True,
+        )

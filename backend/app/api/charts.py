@@ -1,11 +1,13 @@
 from datetime import date, timedelta
 
+import duckdb
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.backpop import run_backpop
 from app.backpop.duckdb_writer import drop_table
+from app.connections.duckdb import is_lock_error
 from app.connections.postgres import SessionLocal, get_db
 from app.crud import charts as crud_charts
 from app.models import BackpopRun
@@ -112,8 +114,21 @@ def update_chart(chart_id: int, payload: ChartUpdate, db: Session = Depends(get_
 
 @router.delete("/{chart_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_chart(chart_id: int, db: Session = Depends(get_db)):
+    if crud_charts.get(db, chart_id) is None:
+        raise HTTPException(status_code=404, detail="chart not found")
+    # Discard the chart's cached aggregates BEFORE the metadata (the Postgres cascade only
+    # covers Postgres). Dropping first keeps the two stores consistent: this needs DuckDB's
+    # write lock, so it fails while a backpop holds it — and if the metadata row were already
+    # gone we'd be left with an orphan chart_<id>_data table and no record it existed.
+    try:
+        drop_table(chart_id)
+    except duckdb.Error as e:
+        if is_lock_error(e):
+            raise HTTPException(
+                status_code=503,
+                detail="a backpopulation is writing the cache — retry the delete in a few seconds",
+                headers={"Retry-After": "5"},
+            )
+        raise
     if not crud_charts.delete(db, chart_id):
         raise HTTPException(status_code=404, detail="chart not found")
-    # Also discard the chart's cached aggregates so no orphan chart_<id>_data
-    # table is left behind in DuckDB (metadata cascade only covers Postgres).
-    drop_table(chart_id)

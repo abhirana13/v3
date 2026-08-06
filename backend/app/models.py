@@ -51,6 +51,13 @@ class Chart(Base):
     # DuckDB file: DuckDB is single-writer across processes, so a running backpop would
     # otherwise make every chart's freshness read contend with the writer.
     cache_latest_date = Column(Date, nullable=True)
+    # Column names present in this chart's DuckDB cache table, mirrored by the worker
+    # after each backpop (same reason as cache_latest_date). Only needed to decide which
+    # backend-derived dimensions apply (derived_dims.derived_for_chart), which the config
+    # page and the dashboard dimension resolution both do on every request — reading the
+    # live DuckDB file for that made them 500 whenever a backpop held the write lock.
+    # Null => never mirrored; callers fall back to the live cache (see cache_present_columns).
+    cache_columns = Column(JSON, nullable=True)
 
     variables = Column(JSON, nullable=False, default=dict, server_default="{}")
     # sha256 of (query + variables) the cached aggregates were last built from.

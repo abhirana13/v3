@@ -12,6 +12,8 @@ which dates in a window are already in DuckDB so it can skip them.
 from datetime import date, datetime, time
 from decimal import Decimal
 
+import duckdb
+
 from app.connections import duckdb as duckdb_conn
 from app.templating import DateBatch
 
@@ -131,6 +133,32 @@ def cache_columns(chart_id: int) -> set[str]:
         return {r[1] for r in conn.execute(f'PRAGMA table_info({_quote(table)})').fetchall()}
     finally:
         conn.close()
+
+
+def cache_present_columns(chart) -> set[str]:
+    """A chart's cache column names, WITHOUT opening DuckDB when it can be avoided.
+
+    Only used to decide which backend-derived dimensions apply (derived_dims), which the
+    config page and dashboard dimension resolution do on every request. Opening the cache
+    file for that is not safe on a request path: DuckDB is single-writer *across processes*
+    and the lock is on the FILE, so while any chart is backpopping every chart's config page
+    got `IOException: Could not set lock on file` -> 500. Measured on a 10-day backpop, the
+    writer held the lock 43% of the run in stretches of 6-7s — longer than the open retry
+    budget, so landing in one was a guaranteed failure, not a slow success.
+
+    So: prefer the list the worker mirrored into Postgres after its last backpop. Fall back
+    to the live cache only when nothing was ever mirrored (a cache predating the column),
+    and swallow a lock conflict there — a derived dimension missing for one render degrades
+    the view, an exception takes the whole page down.
+    """
+    mirrored = chart.cache_columns
+    if mirrored is not None:
+        return set(mirrored)
+    try:
+        return cache_columns(chart.id)
+    except duckdb.Error as e:
+        print(f"[cache] chart {chart.id}: column list unavailable ({e})", flush=True)
+        return set()
 
 
 def materialize_derived(chart) -> None:

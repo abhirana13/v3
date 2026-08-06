@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.backpop.duckdb_writer import cache_columns
+from app.backpop.duckdb_writer import cache_present_columns
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.crud import dims_metrics as crud_dm
@@ -34,7 +34,7 @@ def get_dims_metrics(chart_id: int, db: Session = Depends(get_db)):
     dims = [DimensionOut.model_validate(d) for d in chart.dimensions]
     # append backend-derived dimensions (e.g. country_tier) so the chart can
     # filter/split by them; flagged derived=True so the config page hides them.
-    for i, dd in enumerate(derived_for_chart(chart, cache_columns(chart.id))):
+    for i, dd in enumerate(derived_for_chart(chart, cache_present_columns(chart))):
         dims.append(DimensionOut(
             id=-(i + 1), name=dd.name, column_name=dd.name, kind="regular",
             value_order="natural", display_order=len(chart.dimensions) + i, derived=True,

@@ -29,7 +29,7 @@ metrics (Phase 7).
 
 import re
 
-from app.backpop.duckdb_writer import cache_columns, table_name
+from app.backpop.duckdb_writer import cache_present_columns, table_name
 from app.connections import duckdb as duckdb_conn
 from app.derived_dims import effective_dimensions
 from app.formulas import eval_formula, validate_formula
@@ -273,7 +273,9 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
     if req.granularity not in _GRANULARITY:
         raise ValueError(f"invalid granularity '{req.granularity}'")
 
-    dim_by_name = {d.name: d for d in effective_dimensions(chart, cache_columns(chart.id))}
+    # Postgres-mirrored column list: this runs BEFORE the serving connection is opened
+    # below, so calling it would be a second, separate DuckDB open per request.
+    dim_by_name = {d.name: d for d in effective_dimensions(chart, cache_present_columns(chart))}
     metric_by_name = {m.name: m for m in chart.metrics}
 
     requested_dims = list(dim_by_name) if req.dimensions is None else req.dimensions
