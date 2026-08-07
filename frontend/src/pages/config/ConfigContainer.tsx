@@ -93,8 +93,21 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   const [generated, setGenerated] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
-  const [dims, setDims] = useState({ xAxis: '', timeColumn: '', dateFormat: '%Y-%m-%d', axisOptions: [] as string[], timeOptions: [] as string[], dateFormatOptions: DATE_FORMATS })
+  const [dims, setDims] = useState({ xAxis: '', timeColumn: '', dateFormat: '%Y-%m-%d', timeOptions: [] as string[], dateFormatOptions: DATE_FORMATS })
   const [columns, setColumns] = useState<ConfigColumn[]>([])
+
+  /* X-axis options are DERIVED from `columns`, not stored in `dims`. Stored, they were only
+     recomputed on chart load and after Generate, so flipping a column's Classification from
+     Metric to Dimension left it out of the X-axis dropdown until you saved and reloaded —
+     it looked like the change had not taken. Introspection types every numeric column as a
+     Metric, so game_id / platform / level_number all arrive needing that flip.
+     Included/excluded is deliberately ignored: excluding a dimension only hides its filter
+     chip, it stays valid as the axis (install_date is the motivating case). */
+  const axisOptions = useMemo(
+    () => [dims.timeColumn, ...columns.filter((c) => c.classification === 'Dimension').map((c) => c.name)]
+            .filter(Boolean),
+    [dims.timeColumn, columns],
+  )
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saveOk, setSaveOk] = useState<string | null>(null)
@@ -133,7 +146,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
             ...dm.dimensions.filter((d) => !d.derived).map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: d.value_order || 'natural', included: d.included ?? true })),
             ...dm.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: m.independent_dimensions || [], formula: m.formula || null, decimals: m.decimals ?? 0, yAxis: m.y_axis || 'primary', unit: m.unit || null, included: m.included ?? true })),
           ])
-          setDims((s) => ({ ...s, timeColumn: dm.time_column || '', xAxis: dm.x_axis || dm.time_column || dimNames[0] || '', dateFormat: dm.date_format || '%Y-%m-%d', axisOptions: [dm.time_column || '', ...dimNames].filter(Boolean), timeOptions: [dm.time_column || ''].filter(Boolean) }))
+          setDims((s) => ({ ...s, timeColumn: dm.time_column || '', xAxis: dm.x_axis || dm.time_column || dimNames[0] || '', dateFormat: dm.date_format || '%Y-%m-%d', timeOptions: [dm.time_column || ''].filter(Boolean) }))
           setGenerated(true)
         }
         const rr = await api.backpopRuns(target).catch(() => [])
@@ -207,7 +220,6 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       setDims((s) => ({
         ...s, timeColumn: r.time_column || '',
         xAxis: s.xAxis && dimNames.includes(s.xAxis) ? s.xAxis : (r.time_column || dimNames[0] || ''),
-        axisOptions: [r.time_column || '', ...dimNames].filter(Boolean),
         timeOptions: [r.time_column || ''].filter(Boolean),
       }))
       setGenerated(true)
@@ -355,7 +367,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       }}
       query={query} onQueryChange={setQuery} queryTheme={queryTheme} onQueryThemeChange={setQueryTheme} queryModeWarning={queryModeWarning}
       onGenerate={onGenerate} generated={generated} generating={generating} generateError={generateError}
-      dims={dims} onAxisFieldChange={(patch) => setDims((d) => ({ ...d, ...patch }))} columns={columns} onColumnChange={onColumnChange} onReorderColumns={onReorderColumns}
+      dims={{ ...dims, axisOptions }} onAxisFieldChange={(patch) => setDims((d) => ({ ...d, ...patch }))} columns={columns} onColumnChange={onColumnChange} onReorderColumns={onReorderColumns}
       onBack={onBack} onDelete={savedId != null ? onDelete : undefined}
       onSaveDraft={onSaveDraft} onSaveBackpopulate={onSaveBackpopulate} backpopDefaults={backpopDefaults}
       saving={saving} saveError={saveError} saveOk={saveOk}

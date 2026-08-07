@@ -37,6 +37,18 @@ _OID_NAMES = {
 def _type_name(oid) -> str:
     return _OID_NAMES.get(oid, str(oid))
 
+
+# Numeric columns that are IDENTIFIERS, not measures. Classification is otherwise purely
+# by SQL type, so an integer becomes a Metric — and summing game_id or platform is
+# meaningless, so every chart had to have them flipped to Dimension by hand.
+#
+# Deliberately a short exact-match allowlist rather than a pattern like '*_id' or '*_number':
+# `level_number` IS an integer dimension but `chart_number` is not, and a metric could easily
+# be named `..._id`, so a pattern would guess wrong in both directions. Matched
+# case-insensitively on the exact output column name. Add to it as real cases turn up —
+# anything not listed still just needs one flip in the config table.
+_NUMERIC_DIMENSION_NAMES = {"game_id", "platform"}
+
 _TRAILING_LIMIT_RE = re.compile(
     r"\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?\s*$", re.IGNORECASE
 )
@@ -92,7 +104,7 @@ def classify_columns(description: list) -> IntrospectionResult:
                 time_column = name
             else:
                 dimensions.append(DimensionIn(name=name, column_name=name, kind="regular", data_type=dtype))
-        elif type_code in _NUMERIC_OIDS:
+        elif type_code in _NUMERIC_OIDS and name.lower() not in _NUMERIC_DIMENSION_NAMES:
             metrics.append(MetricIn(name=name, column_name=name, data_type=dtype))
         else:
             dimensions.append(DimensionIn(name=name, column_name=name, kind="regular", data_type=dtype))

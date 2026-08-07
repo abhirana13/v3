@@ -173,3 +173,37 @@ def test_introspect_query_propagates_db_error():
             assert "connection refused" in str(e)
         else:
             raise AssertionError("expected IntrospectionError")
+
+
+def test_numeric_identifier_columns_classify_as_dimensions():
+    """game_id and platform are integers but identifiers, not measures.
+
+    Classification is otherwise purely by SQL type, so they landed in `metrics` and every
+    chart needed them flipped to Dimension by hand — which also kept them out of the
+    config page's X-axis dropdown, since that lists dimensions only.
+    """
+    r = classify_columns([
+        _col("event_date", 1082),
+        _col("game_id", 23),
+        _col("platform", 23),
+        _col("country", 1043),
+        _col("dau", 23),
+    ])
+    assert r.time_column == "event_date"
+    assert [d.name for d in r.dimensions] == ["game_id", "platform", "country"]
+    assert [m.name for m in r.metrics] == ["dau"]
+
+
+def test_numeric_identifier_match_is_case_insensitive_and_exact():
+    """Matched on the exact lowercased name — NOT a '*_id'/'*_number' pattern, which would
+    misclassify both ways (level_number is a dimension, chart_number is not, and a metric
+    can easily be named something_id)."""
+    r = classify_columns([
+        _col("GAME_ID", 20),        # same column, shouted
+        _col("Platform", 23),
+        _col("level_number", 23),   # integer dimension, but NOT on the allowlist
+        _col("game_id_count", 23),  # must not match on a prefix
+        _col("player_id", 20),      # must not match on a suffix
+    ])
+    assert [d.name for d in r.dimensions] == ["GAME_ID", "Platform"]
+    assert [m.name for m in r.metrics] == ["level_number", "game_id_count", "player_id"]
