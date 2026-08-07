@@ -1,5 +1,16 @@
 # Production-only compose. For local dev use docker-compose.yml instead.
 # Run: docker compose -f docker-compose.prod.yml up -d --build
+# Every container logs to json-file, which by DEFAULT grows without limit. Uvicorn logs a
+# line per request and the worker logs per batch, so on a long-lived box those files are a
+# steady march toward a full disk — which is exactly what took the deploys down: the build
+# died on "No space left on device", and the only cleanup step ran AFTER the build, so it
+# never got a chance to run again. 10MB x 3 files caps each service at 30MB.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,6 +26,7 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
     networks: [analytics-net]
 
   backend:
@@ -32,6 +44,7 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     networks: [analytics-net]
 
   worker:
@@ -49,6 +62,7 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     networks: [analytics-net]
 
   nginx:
@@ -57,6 +71,7 @@ services:
       dockerfile: nginx/Dockerfile
     depends_on: [backend]
     restart: unless-stopped
+    logging: *default-logging
     networks: [analytics-net]
 
   oauth2-proxy:
@@ -82,6 +97,7 @@ services:
       - "4180:4180"
     depends_on: [nginx]
     restart: unless-stopped
+    logging: *default-logging
     networks: [analytics-net]
 
 volumes:

@@ -10,10 +10,15 @@ jobs:
     environment: prod
     steps:
       - name: Configure AWS credentials
-        # v5, not v4: v4 targets Node 20, which GitHub now force-runs on Node 24
+        # v6, not v4 and not v5: BOTH v4 and v5 declare runs.using = node20, which GitHub now
+        # force-runs on Node 24
         # (https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/).
-        # v5 targets Node 24 natively. Same inputs, drop-in.
-        uses: aws-actions/configure-aws-credentials@v5
+        # v6 is the first major that declares node24. Same aws-access-key-id /
+        # aws-secret-access-key / aws-region inputs, so it is a drop-in.
+        # NOTE: this only silences the deprecation warning — it is NOT what was failing the
+        # deploy. "Process completed with exit code 1" came from the Deploy via SSM step,
+        # which means this step had already succeeded.
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -33,6 +38,10 @@ jobs:
               "git pull origin main",
               "mkdir -p /usr/local/lib/docker/cli-plugins",
               "if [ ! -x /usr/local/lib/docker/cli-plugins/docker-buildx ]; then curl -fsSL https://github.com/docker/buildx/releases/download/v0.35.0/buildx-v0.35.0.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx; fi",
+              "echo ===== disk before =====; df -h /; docker system df || true",
+              "docker image prune -af || true",
+              "if [ $(df --output=pcent / | tr -dc 0-9) -gt 80 ]; then echo Disk still above 80 pct, dropping the build cache; docker builder prune -af || true; fi",
+              "echo ===== disk after prune =====; df -h /",
               "docker compose -f docker-compose.prod.yml up --build -d",
               "docker image prune -f"
             ]' \
