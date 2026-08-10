@@ -5,8 +5,25 @@ import type { BackpopRun, ChartFull, ChartOverview, ChartSummary, ChartWriteBody
 
 const BASE = '/api'
 
-async function json<T>(url: string, opts?: RequestInit): Promise<T> {
+/* A 503 from this backend means one specific thing: a backpopulation holds DuckDB's write
+   lock, which is per-FILE and so blocks reads of every chart, not just the one being written.
+   It clears on its own in seconds, so surfacing it as an error was wrong — the user opened an
+   unrelated chart and got "the aggregate cache is being written by a backpopulation right
+   now". Wait out the window instead, honouring the Retry-After the backend sends.
+
+   Only for GET. A 503 on a mutation is left alone: our one mutating 503 (chart delete) means
+   the drop did not happen, and silently retrying writes is how you get surprises. */
+const RETRY_503 = 2
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+async function json<T>(url: string, opts?: RequestInit, attempt = 0): Promise<T> {
   const res = await fetch(BASE + url, opts)
+  if (res.status === 503 && attempt < RETRY_503 && !(opts?.method && opts.method !== 'GET')) {
+    const after = Number(res.headers.get('Retry-After'))
+    await sleep((Number.isFinite(after) && after > 0 ? after : 5) * 1000)
+    return json<T>(url, opts, attempt + 1)
+  }
   if (!res.ok) {
     const body = await res.text()
     throw new Error(`${res.status} ${res.statusText}: ${body}`)
