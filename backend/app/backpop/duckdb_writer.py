@@ -182,7 +182,23 @@ def materialize_derived(chart) -> None:
                 continue
             if d.name not in cols:
                 conn.execute(f'ALTER TABLE {_quote(table)} ADD COLUMN {_quote(d.name)} VARCHAR')
-            conn.execute(f'UPDATE {_quote(table)} SET {_quote(d.name)} = {case_sql(d)}')
+            # Only write rows whose value would actually CHANGE. This used to be an
+            # unconditional `UPDATE ... SET col = CASE ...`, which rewrote every row of the
+            # column on every backpop even though nothing about the old rows had changed —
+            # and it did so holding DuckDB's exclusive write lock, which is per-FILE and
+            # therefore blocks reads of EVERY chart, not just this one. That was the single
+            # longest lock window in a backpop and the main source of the 503s users saw when
+            # opening an unrelated chart.
+            #
+            # The predicate keeps the original semantics: a mapping change in
+            # DERIVED_DIMENSIONS still propagates to historical rows, because those rows now
+            # compare unequal. What it drops is the pointless rewrite of rows that already
+            # hold the right value — after the first run, that is everything but the batch
+            # just appended.
+            conn.execute(
+                f'UPDATE {_quote(table)} SET {_quote(d.name)} = {case_sql(d)} '
+                f'WHERE {_quote(d.name)} IS NULL OR {_quote(d.name)} <> {case_sql(d)}'
+            )
     finally:
         conn.close()
 
