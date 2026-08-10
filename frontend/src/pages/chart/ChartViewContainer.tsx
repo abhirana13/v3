@@ -300,9 +300,31 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       const sKey = (mKey: string, combo: string) => `${mKey}${combo}`
       const multi = visibleMetrics.length > 1
 
+      // Series order. This used to be order-of-first-appearance in the rows, which is the
+      // backend's (time bucket, dim) ordering — so the legend was governed by whichever
+      // cohorts happened to show up on the earliest day, e.g. "D2-D7, D8-D14, D0, D1,
+      // D15-D30, D360+, D31-D60". Now it follows the dimension's own value_order, the same
+      // setting the config page exposes, so the legend, the x-axis and the filter dropdowns
+      // all agree:
+      //   'natural' (default) -> D0, D1, D2-D7, D8-D14, D15-D30 ... (naturalCompare)
+      //   'metric'            -> biggest series first
+      // With several split dims the FIRST one is the primary grouping, so its setting wins.
       const order: string[] = []
       const seen = new Set<string>()
       for (const r of plotRows) { const k = comboOf(r); if (!seen.has(k)) { seen.add(k); order.push(k) } }
+
+      const primaryOrder = cfg.dimensions.find((d) => d.name === splitDims[0]?.key)?.value_order
+      if (primaryOrder === 'metric') {
+        const rank = visibleMetrics[0]
+        const total = new Map<string, number>()
+        if (rank) for (const r of plotRows) {
+          const k = comboOf(r)
+          total.set(k, (total.get(k) ?? 0) + (Number(r[rank.name]) || 0))
+        }
+        order.sort((a, b) => (total.get(b) ?? 0) - (total.get(a) ?? 0) || naturalCompare(a, b))
+      } else {
+        order.sort(naturalCompare)
+      }
 
       const series: UISeries[] = []
       let ci = 0
