@@ -62,7 +62,7 @@ def _quote(name: str) -> str:
 def drop_table(chart_id: int) -> None:
     """Discard a chart's cached table — used when the query changed and the cache
     is stale (a fresh build then recreates it, picking up any column changes)."""
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(chart_id)
     try:
         conn.execute(f"DROP TABLE IF EXISTS {_quote(table_name(chart_id))}")
     finally:
@@ -89,7 +89,7 @@ def poisoned_metric_columns(chart_id: int, metric_columns: set[str]) -> list[str
     the signature of a cache poisoned by bad first-batch inference (a sparse/all-NULL or
     stringy first batch typed the column VARCHAR). Empty list if the table is absent or
     every metric column is a numeric type (int/float/decimal all count as healthy)."""
-    conn = duckdb_conn.get_connection(read_only=True)
+    conn = duckdb_conn.get_connection(chart_id, read_only=True)
     try:
         table = table_name(chart_id)
         if not conn.execute(
@@ -105,7 +105,7 @@ def poisoned_metric_columns(chart_id: int, metric_columns: set[str]) -> list[str
 def data_extent(chart_id: int, time_column: str) -> tuple[date | None, date | None]:
     """(min, max) of the time column in the cache (both None if the table is absent).
     Used to rebuild a poisoned cache over its FULL range so no history is dropped."""
-    conn = duckdb_conn.get_connection(read_only=True)
+    conn = duckdb_conn.get_connection(chart_id, read_only=True)
     try:
         table = table_name(chart_id)
         if not conn.execute(
@@ -123,7 +123,7 @@ def data_extent(chart_id: int, time_column: str) -> tuple[date | None, date | No
 
 def cache_columns(chart_id: int) -> set[str]:
     """Column names in a chart's cache table (empty set if it doesn't exist yet)."""
-    conn = duckdb_conn.get_connection(read_only=True)
+    conn = duckdb_conn.get_connection(chart_id, read_only=True)
     try:
         table = table_name(chart_id)
         if not conn.execute(
@@ -168,7 +168,7 @@ def materialize_derived(chart) -> None:
     from app.derived_dims import DERIVED_DIMENSIONS, case_sql
 
     dim_names = {d.name for d in chart.dimensions}
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(chart.id)
     try:
         table = table_name(chart.id)
         if not conn.execute(
@@ -206,7 +206,7 @@ def materialize_derived(chart) -> None:
 def present_dates(
     chart_id: int, time_column: str, from_date: date, to_date: date
 ) -> set[date]:
-    conn = duckdb_conn.get_connection(read_only=True)
+    conn = duckdb_conn.get_connection(chart_id, read_only=True)
     try:
         table = table_name(chart_id)
         exists = conn.execute(
@@ -234,7 +234,7 @@ def write_batch(
     time_column: str | None,
     numeric_columns: set[str] = frozenset(),
 ) -> int:
-    conn = duckdb_conn.get_connection()
+    conn = duckdb_conn.get_connection(chart_id)
     try:
         table = table_name(chart_id)
         existing = conn.execute(

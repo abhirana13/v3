@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.backpop import run_backpop
 from app.backpop.duckdb_writer import drop_table
+from app.connections import duckdb as duckdb_conn
 from app.connections.duckdb import is_lock_error
 from app.connections.postgres import SessionLocal, get_db
 from app.crud import charts as crud_charts
@@ -117,11 +118,15 @@ def delete_chart(chart_id: int, db: Session = Depends(get_db)):
     if crud_charts.get(db, chart_id) is None:
         raise HTTPException(status_code=404, detail="chart not found")
     # Discard the chart's cached aggregates BEFORE the metadata (the Postgres cascade only
-    # covers Postgres). Dropping first keeps the two stores consistent: this needs DuckDB's
-    # write lock, so it fails while a backpop holds it — and if the metadata row were already
-    # gone we'd be left with an orphan chart_<id>_data table and no record it existed.
+    # covers Postgres). Dropping first keeps the two stores consistent: if the metadata row
+    # were already gone we'd be left with an orphan cache file and no record it existed.
+    #
+    # drop_table first, then delete the file. The table drop is what surfaces a lock conflict
+    # (this chart's own backpop is mid-write), which is the case we want to turn into a 503 —
+    # deleting the file out from under a running backpop would be far worse.
     try:
         drop_table(chart_id)
+        duckdb_conn.drop_chart_db(chart_id)
     except duckdb.Error as e:
         if is_lock_error(e):
             raise HTTPException(

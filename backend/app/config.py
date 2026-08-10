@@ -31,6 +31,20 @@ class Settings(BaseSettings):
 
     duckdb_path: str = "/data/aggregates.duckdb"
 
+    # Per-connection caps for the per-chart caches. DuckDB defaults memory_limit to ~80% of
+    # host RAM (measured 6.1 GiB here) and threads to the core count (10) — PER DATABASE
+    # INSTANCE. With one shared cache file every connection in a process shared a single
+    # instance and so a single budget; now that each chart is its own file, N charts touched
+    # at once are N instances that each independently believe they may use 6.1 GiB and spawn
+    # 10 threads, with nothing capping the total. On an 8 GB box also running Postgres, two
+    # uvicorn workers and the backpop worker, that is an OOM waiting for a busy moment.
+    #
+    # The caches are tiny — the largest is 2.6 MB — so 256 MB is ~100x the biggest file and
+    # will not spill; 2 threads is plenty for scans of that size and stops N instances
+    # oversubscribing the CPU. Env-tunable so prod can differ without a code change.
+    duckdb_memory_limit: str = "256MB"
+    duckdb_threads: int = 2
+
     # Trailing window (in days, ending today) that backpopulation ALWAYS re-pulls and
     # overwrites in daily+append mode, so late-arriving / restated recent data is picked
     # up without a query change. Older days keep the cheap fill-missing (skip) behavior.

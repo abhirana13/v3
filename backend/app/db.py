@@ -5,6 +5,8 @@ so both can boot independently against a fresh or partially-migrated database.
 Replace with Alembic when v1 stabilizes.
 """
 
+import os
+
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
@@ -135,6 +137,61 @@ def ensure_schema(eng=None) -> None:
         if pending:
             session.commit()
 
+    # ------------------------------------------------------------------
+    # ONE-OFF: split the legacy shared cache file into one file per chart
+    # ------------------------------------------------------------------
+    # The cache used to be a single aggregates.duckdb holding a chart_<id>_data table per
+    # chart. The data was already isolated, but DuckDB's write lock is per-FILE, so a backpop
+    # of one chart locked out reads of every other chart — users opening an unrelated chart
+    # mid-backpop got a 503. Each chart now gets its own file.
+    #
+    # Idempotent and self-healing, like the seeds below: it keys on "the legacy file still has
+    # chart tables", copies each one out, and only then drops it from the legacy file. Both the
+    # backend and the worker run ensure_schema() at startup, so a lock conflict here is normal
+    # — skip and let the next boot finish the job.
+    from app.connections import duckdb as duckdb_conn
+
+    if os.path.exists(duckdb_conn.legacy_path()):
+        try:
+            legacy = duckdb_conn.get_legacy_connection()
+        except Exception as e:
+            legacy = None
+            print(f"[schema] cache split deferred ({type(e).__name__}: {e})", flush=True)
+        if legacy is not None:
+            try:
+                ids = duckdb_conn.legacy_chart_ids(legacy)
+                moved = []
+                for cid in ids:
+                    table = f"chart_{cid}_data"
+                    target = duckdb_conn.chart_db_path(cid)
+                    try:
+                        # ATTACH the new per-chart file and copy the table across, then drop
+                        # the original. Done one chart at a time so a failure mid-way leaves
+                        # every other chart's data exactly where it was.
+                        legacy.execute(f"ATTACH '{target}' AS split_{cid}")
+                        legacy.execute(
+                            f'CREATE TABLE IF NOT EXISTS split_{cid}."{table}" AS '
+                            f'SELECT * FROM "{table}"'
+                        )
+                        legacy.execute(f"DETACH split_{cid}")
+                        legacy.execute(f'DROP TABLE "{table}"')
+                        moved.append(cid)
+                    except Exception as e:
+                        print(f"[schema] chart {cid}: cache split failed ({e})", flush=True)
+                if moved:
+                    print(f"[schema] split cache into per-chart files for {len(moved)} "
+                          f"chart(s): {moved}", flush=True)
+                remaining = duckdb_conn.legacy_chart_ids(legacy)
+            finally:
+                legacy.close()
+            # Only remove the legacy file once nothing is left in it.
+            if not remaining:
+                for suffix in ("", ".wal"):
+                    pth = duckdb_conn.legacy_path() + suffix
+                    if os.path.exists(pth):
+                        os.remove(pth)
+                print("[schema] legacy shared cache file removed", flush=True)
+
     # Backfill the two Postgres mirrors of DuckDB state for any chart that doesn't have them
     # yet, so request paths never open the cache file (see charts_overview and
     # duckdb_writer.cache_present_columns):
@@ -162,45 +219,56 @@ def ensure_schema(eng=None) -> None:
         return
 
     from app.backpop.duckdb_writer import table_name
-    from app.connections import duckdb as duckdb_conn
 
-    try:
-        conn = duckdb_conn.get_connection(read_only=True)
-    except Exception as e:  # cache locked/unopenable — retried next startup, or by a backpop
-        print(f"[schema] cache mirror seed skipped ({type(e).__name__}: {e})", flush=True)
-        return
-    try:
-        present = {
-            r[0] for r in conn.execute(
-                "SELECT table_name FROM information_schema.tables"
-            ).fetchall()
-        }
-        found: dict[int, object] = {}
-        for cid, time_col in need_date:
-            if table_name(cid) not in present:
-                continue  # no cache built yet — the first backpop will set it
-            try:
+    # One connection PER CHART now — there is no shared file to read them all from. Each open
+    # is cheap and only contends with that chart's own backpop, so a chart being written just
+    # gets skipped and picked up next boot instead of blocking the others.
+    found: dict[int, object] = {}
+    found_cols: dict[int, list[str]] = {}
+
+    def _open(cid):
+        if not duckdb_conn.chart_db_exists(cid):
+            return None  # never backpopped — the first run will set both values
+        try:
+            return duckdb_conn.get_connection(cid, read_only=True)
+        except Exception as e:
+            print(f"[schema] chart {cid}: cache unopenable ({type(e).__name__}: {e})", flush=True)
+            return None
+
+    for cid, time_col in need_date:
+        conn = _open(cid)
+        if conn is None:
+            continue
+        try:
+            table = table_name(cid)
+            if conn.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+            ).fetchone():
                 row = conn.execute(
-                    f'SELECT MAX(CAST("{time_col}" AS DATE)) FROM "{table_name(cid)}"'
+                    f'SELECT MAX(CAST("{time_col}" AS DATE)) FROM "{table}"'
                 ).fetchone()
-            except Exception as e:
-                print(f"[schema] chart {cid}: freshness seed failed ({e})", flush=True)
-                continue
-            if row and row[0] is not None:
-                found[cid] = row[0]
+                if row and row[0] is not None:
+                    found[cid] = row[0]
+        except Exception as e:
+            print(f"[schema] chart {cid}: freshness seed failed ({e})", flush=True)
+        finally:
+            conn.close()
 
-        found_cols: dict[int, list[str]] = {}
-        for cid in need_cols:
-            if table_name(cid) not in present:
-                continue
-            try:
-                rows = conn.execute(f'PRAGMA table_info("{table_name(cid)}")').fetchall()
-            except Exception as e:
-                print(f"[schema] chart {cid}: column seed failed ({e})", flush=True)
-                continue
-            found_cols[cid] = sorted(r[1] for r in rows)
-    finally:
-        conn.close()
+    for cid in need_cols:
+        conn = _open(cid)
+        if conn is None:
+            continue
+        try:
+            table = table_name(cid)
+            if conn.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]
+            ).fetchone():
+                rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                found_cols[cid] = sorted(r[1] for r in rows)
+        except Exception as e:
+            print(f"[schema] chart {cid}: column seed failed ({e})", flush=True)
+        finally:
+            conn.close()
 
     if found or found_cols:
         with Session(eng) as session:

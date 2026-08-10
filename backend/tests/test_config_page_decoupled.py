@@ -22,6 +22,7 @@ read DuckDB must report 503 (transient), NOT the "cache type error (rebuild this
 data to fix)" 400 — following that advice during a backpop destroys a healthy cache.
 """
 
+import os
 from datetime import date
 from unittest.mock import MagicMock, patch
 
@@ -246,42 +247,40 @@ def test_dim_values_reports_busy(client, db_session, duckdb_path):
     assert r.headers.get("Retry-After") == "5"
 
 
-def test_health_check_is_read_only(duckdb_path):
-    """The backend never writes the cache — only the worker does. A read-write health probe
-    contended with the writer and reported `error` for the whole of every backpop."""
+def test_health_check_never_opens_a_chart_cache(duckdb_path):
+    """/health must not touch any chart's cache.
+
+    It used to open the one shared cache file, which meant a chart being backpopped made the
+    whole health endpoint report a fault — the probe contended with the very lock it was
+    reporting on. Now that each chart has its own file there is no single file to probe, and
+    picking one arbitrarily would be worse: it would report `busy` whenever that chart
+    happened to be mid-backpop. So `check()` uses a dedicated `_health.duckdb` that nothing
+    else ever touches, which also proves the directory is WRITABLE rather than merely readable.
+    """
     from app.connections import duckdb as duckdb_conn
 
-    duckdb_conn.ensure_database()
-    opened: list[bool] = []
-    real = duckdb_conn.get_connection
+    def boom(*a, **k):
+        raise AssertionError("health must not open a chart's cache")
 
-    def spy(read_only=False):
-        opened.append(read_only)
-        return real(read_only=read_only)
-
-    with patch.object(duckdb_conn, "get_connection", spy):
+    with patch.object(duckdb_conn, "get_connection", boom):
         result = duckdb_conn.check()
     assert result["status"] == "ok", result
-    assert opened == [True], f"health check opened read-write: {opened}"
+    assert os.path.exists(os.path.join(duckdb_conn.charts_dir(), "_health.duckdb"))
 
 
-def test_health_reports_busy_while_locked(duckdb_path):
-    """A backpop writing the cache is normal operation, so /health says busy, not error —
-    it used to report `error` for the whole of every backpop.
+def test_health_reports_busy_not_error_on_a_lock(duckdb_path):
+    """A lock is normal operation, so it is reported as busy rather than error.
 
-    The lock error is injected rather than produced by a real second holder: DuckDB caches
-    database instances per process, so once anything in this pytest process has opened a
-    path, a cross-process holder for it may or may not win the lock depending on test order.
-    _LockHolder is used for the one test where the real thing is the point (the reported
-    config-page bug); here the contract under test is only how a lock error is classified.
+    Injected rather than produced by a real second holder: DuckDB caches database instances
+    per process, so once anything in this pytest process has opened a path a cross-process
+    holder may or may not win the lock depending on test order.
     """
     from app.connections import duckdb as duckdb_conn
 
     err = duckdb.IOException('Could not set lock on file "x": Conflicting lock is held')
-    with patch.object(duckdb_conn, "get_connection", side_effect=err):
+    with patch.object(duckdb_conn.duckdb, "connect", side_effect=err):
         result = duckdb_conn.check()
     assert result["status"] == "busy", result
-    assert "backpop" in result["detail"]
 
 
 # --------------------------------------------------------------------------------------
