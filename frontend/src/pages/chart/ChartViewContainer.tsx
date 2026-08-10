@@ -5,6 +5,7 @@ import { ChartView } from './ChartView'
 import type { MetricDraft } from './MetricSettingsModal'
 import type { ChartRow, UIDimension, UIMetric, UISeries } from '../../components/types'
 import { decodeSelection, encodeSelection, loadChartView, saveChartView } from './viewState'
+import { naturalCompare } from './transforms'
 
 const PALETTE = ['#38bdf8', '#a855f7', '#16a34a', '#f59e0b', '#ef4444', '#14b8a6', '#6366f1', '#ec4899', '#0ea5e9', '#84cc16']
 const GRAN: Record<string, string> = { Day: 'day', Week: 'week', Month: 'month' }
@@ -280,7 +281,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         const byT = new Map(plotRows.map((r) => [String(r[tc]), r]))
         const dates = buckets.length
           ? buckets
-          : [...new Set(plotRows.map((r) => String(r[tc])))].sort()
+          : [...new Set(plotRows.map((r) => String(r[tc])))].sort(naturalCompare)
         setChartData(dates.map((d) => {
           const r = byT.get(d)
           const row: ChartRow = { date: d }
@@ -318,7 +319,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         if (!row) { row = { date }; byDate.set(date, row) }
         for (const m of visibleMetrics) row[sKey(m.key, combo)] = (r[m.name] as number) ?? null
       }
-      setChartData([...byDate.values()].sort((a, b) => (String(a.date) < String(b.date) ? -1 : 1)))
+      setChartData([...byDate.values()].sort((a, b) => naturalCompare(a.date, b.date)))
       setLoading(false)
     }).catch((e) => {
       if (token !== fetchToken.current) return

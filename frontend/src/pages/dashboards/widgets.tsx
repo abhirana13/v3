@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ChartWidgetData, ChartWidgetConfig, NumberWidgetData, WidgetMetricSel } from '../../api/types'
+import { naturalCompare } from '../chart/transforms'
 
 /* Widget cards for the dashboard grid, ported from the Claude Design handoff
    (dashboard.jsx): WidgetChrome + NumberWidget + ChartWidgetCard. Dumb — data
@@ -154,7 +155,10 @@ interface BuiltSeries { name: string; metric: string; data: (number | null)[] }
 function buildSeries(data: ChartWidgetData): { dates: string[]; series: BuiltSeries[]; truncated: boolean } {
   const timeCol = data.time_column
   const dimCols = data.dimension_columns
-  const dates = [...new Set(data.rows.map((r) => String(r[timeCol])))].sort()
+  // naturalCompare, not .sort(): a widget on a PIVOTED chart puts a dimension value in
+  // the x slot, and string order gives "0, 1, 10, 11 ... 19, 2, 20" for a level number
+  // and scrambles the D2-D7 / D8-D14 / D15-D30 cohort buckets. ISO dates are unaffected.
+  const dates = [...new Set(data.rows.map((r) => String(r[timeCol])))].sort(naturalCompare)
   const dateIdx = new Map(dates.map((d, i) => [d, i]))
 
   // one series per metric × dimension-value combo

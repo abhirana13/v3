@@ -39,3 +39,38 @@ export function applyMovingAverage(data: ChartRow[], series: UISeries[], window:
 // BACKEND (chart.x_axis / the x_axis query param), so rows arrive keyed on it directly:
 // correct aggregation at any cardinality, no 20-series split cap, and the
 // independent-metric dedup applied in SQL rather than re-derived from summed series.
+
+/* Order x-axis categories the way a human reads them, not the way strings sort.
+   The x slot holds an ISO date on a time axis but a DIMENSION VALUE when the chart is
+   pivoted (x_axis = a dimension), and both arrive here coerced to a string. A plain
+   .sort() then produces "0, 1, 10, 11, ... 19, 2, 20" for level_number, and puts the
+   cohort buckets in the order D1, D121-D360, D15-D30, D2-D7 — both unreadable.
+
+   Splits each label into digit and non-digit chunks and compares chunk by chunk,
+   numerically where both chunks are digits. Digits sort before text at the same
+   position, mirroring app/serving/_natural_key so the axis and the filter dropdowns
+   agree. ISO dates are unaffected: 2026-08-04 splits to [2026, '-', 8, '-', 4] and
+   still compares in calendar order. */
+type NatChunk = [0, number] | [1, string]
+
+function naturalKey(value: unknown): NatChunk[] {
+  return String(value)
+    .split(/(\d+)/)
+    .filter((p) => p !== '')
+    .map<NatChunk>((p) => (/^\d+$/.test(p) ? [0, Number(p)] : [1, p.toLowerCase()]))
+}
+
+export function naturalCompare(a: unknown, b: unknown): number {
+  const ka = naturalKey(a)
+  const kb = naturalKey(b)
+  for (let i = 0; i < Math.max(ka.length, kb.length); i++) {
+    const x = ka[i]
+    const y = kb[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    if (x[0] !== y[0]) return x[0] - y[0]          // digits before text
+    if (x[1] < y[1]) return -1
+    if (x[1] > y[1]) return 1
+  }
+  return 0
+}
