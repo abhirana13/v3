@@ -25,7 +25,23 @@ DERIVED_DIMENSIONS: list[DerivedDim] = [
     DerivedDim(
         name="country_tier",
         source_column="country",
-        buckets={"Tier-1": ["United States", "United Kingdom", "Australia", "Canada"]},
+        # ISO-2 CODES FIRST, because that is what events.country actually holds — 'US', 'PH',
+        # 'GB'. The list used to contain only full names ("United States", "United Kingdom",
+        # ...), which never matched anything: every row in every chart came out 'Tier-2'.
+        # Measured on chart 15 before this fix: 76,011 rows, 208 distinct countries, ZERO
+        # Tier-1. The dimension was a constant and nobody noticed, because a wrong bucket
+        # looks exactly like a real one.
+        #
+        # 'GB' is the code the SDK emits for the UK — there are no 'UK' rows at all — but 'UK'
+        # is kept because some SDKs do send it and the cost of a spare literal is nothing.
+        # Full names are kept for the same reason: a query that joins a country lookup would
+        # emit them, and matching both means neither shape silently falls through.
+        buckets={
+            "Tier-1": [
+                "US", "GB", "UK", "AU", "CA",
+                "United States", "United Kingdom", "Australia", "Canada",
+            ]
+        },
         default="Tier-2",
     ),
 ]
@@ -38,10 +54,18 @@ def _q(name: str) -> str:
 
 
 def case_sql(d: DerivedDim) -> str:
-    """SQL CASE mapping the source column to its bucket name."""
+    """SQL CASE mapping the source column to its bucket name.
+
+    Matched on UPPER(TRIM(col)) so a value that differs only in case or padding still lands in
+    the right bucket. The whole class of bug this dimension shipped with was "the value looks
+    right but does not match the literal" — 'United States' against a column holding 'US' —
+    and 'us' or ' US ' would fail the same way for the same reason. Bucket values are folded
+    the same way here, so the lists above can be written in whatever case reads best.
+    """
     lit = lambda v: "'" + str(v).replace("'", "''") + "'"
+    col = f"UPPER(TRIM({_q(d.source_column)}))"
     whens = " ".join(
-        f"WHEN {_q(d.source_column)} IN ({', '.join(lit(v) for v in vals)}) THEN {lit(bucket)}"
+        f"WHEN {col} IN ({', '.join(lit(str(v).strip().upper()) for v in vals)}) THEN {lit(bucket)}"
         for bucket, vals in d.buckets.items()
     )
     return f"CASE {whens} ELSE {lit(d.default)} END"

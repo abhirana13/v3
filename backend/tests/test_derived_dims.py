@@ -82,3 +82,76 @@ def test_derived_dim_is_not_persisted_as_real(client, db_session, isolated_duckd
     })
     saved = [d.name for d in db_session.get(Chart, cid).dimensions]
     assert saved == ["country"]  # country_tier not persisted
+
+
+def test_country_tier_matches_iso2_codes_not_just_full_names(client, db_session, isolated_duckdb):
+    """events.country holds ISO-2 CODES ('US', 'GB', 'PH'), not full names.
+
+    The bucket list originally contained only full names, so nothing ever matched and every
+    row in every chart came out 'Tier-2'. Measured on the real cache before the fix: 76,011
+    rows across 208 countries, ZERO Tier-1. A wrong bucket is indistinguishable from a real
+    one, which is why it went unnoticed — hence this test.
+
+    Also pins the case/whitespace folding and GB-vs-UK, both of which fail the same silent way.
+    """
+    cid = _make_chart(client)
+    _seed(
+        isolated_duckdb, cid,
+        [("event_date", "DATE"), ("country", "VARCHAR"), ("dau", "BIGINT")],
+        [
+            (date(2026, 6, 1), "US", 100),              # the real shape of the data
+            (date(2026, 6, 1), "GB", 90),               # the UK's actual ISO-2 code
+            (date(2026, 6, 1), "UK", 80),               # some SDKs send this instead
+            (date(2026, 6, 1), "AU", 70),
+            (date(2026, 6, 1), "CA", 60),
+            (date(2026, 6, 1), " us ", 50),             # padded + lowercase
+            (date(2026, 6, 1), "United States", 40),    # full name still works
+            (date(2026, 6, 1), "PH", 30),               # Tier-2
+            (date(2026, 6, 1), "IN", 20),               # Tier-2
+            (date(2026, 6, 1), "UNKNOWN", 10),          # real value in the data; Tier-2
+        ],
+    )
+    materialize_derived(db_session.get(Chart, cid))
+
+    con = duckdb.connect(isolated_duckdb)
+    rows = dict(
+        con.execute(
+            f'SELECT country, country_tier FROM "{table_name(cid)}"'
+        ).fetchall()
+    )
+    con.close()
+
+    for c in ("US", "GB", "UK", "AU", "CA", " us ", "United States"):
+        assert rows[c] == "Tier-1", f"{c!r} should be Tier-1, got {rows[c]!r}"
+    for c in ("PH", "IN", "UNKNOWN"):
+        assert rows[c] == "Tier-2", f"{c!r} should be Tier-2, got {rows[c]!r}"
+
+
+def test_changing_the_bucket_mapping_propagates_to_existing_rows(client, db_session, isolated_duckdb):
+    """materialize_derived must correct rows written under an OLD mapping.
+
+    This is what let the country_tier fix repair history without a forced rebuild: the UPDATE
+    is predicated on `col IS NULL OR col <> <case>`, so a row holding a stale bucket compares
+    unequal and gets rewritten. Verified on the real cache — 76,011 rows all 'Tier-2' became
+    12,131 'Tier-1' / 63,880 'Tier-2' on the next run. A `WHERE col IS NULL` optimisation
+    would silently freeze history at the old mapping, so this test guards that predicate.
+    """
+    cid = _make_chart(client)
+    _seed(
+        isolated_duckdb, cid,
+        [("event_date", "DATE"), ("country", "VARCHAR"), ("dau", "BIGINT"),
+         ("country_tier", "VARCHAR")],
+        [
+            (date(2026, 6, 1), "US", 100, "Tier-2"),   # wrong, as shipped
+            (date(2026, 6, 1), "PH", 30, "Tier-2"),    # already right
+            (date(2026, 6, 1), "CA", 60, None),        # never computed
+        ],
+    )
+    materialize_derived(db_session.get(Chart, cid))
+
+    con = duckdb.connect(isolated_duckdb)
+    rows = dict(con.execute(f'SELECT country, country_tier FROM "{table_name(cid)}"').fetchall())
+    con.close()
+    assert rows["US"] == "Tier-1", "a stale bucket must be corrected, not left alone"
+    assert rows["CA"] == "Tier-1", "a NULL must be filled"
+    assert rows["PH"] == "Tier-2"
