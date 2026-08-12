@@ -152,7 +152,9 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
       lineStyle: { width: percentStacked ? 1 : 1.6, color: s.color },
       itemStyle: { color: s.color },
       areaStyle: percentStacked ? { opacity: 0.85, color: s.color } : (seriesType === 'area' ? { opacity: 0.12, color: s.color } : undefined),
-      emphasis: { focus: 'series' as const },
+      // 2.6px on hover-focus: with 20 similar hues on one plot, thickening the focused line is
+      // how you confirm WHICH series the tooltip is describing.
+      emphasis: { focus: 'series' as const, lineStyle: { width: percentStacked ? 1 : 2.6 } },
       connectNulls: d.connectNulls,
       data: data.map((row) => row[s.key] ?? null),
     }))

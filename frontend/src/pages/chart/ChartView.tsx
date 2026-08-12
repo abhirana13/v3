@@ -19,6 +19,7 @@ import { applyMovingAverage, applyPercentage } from './transforms'
 
 const DEFAULT_CHART_OPTIONS: ChartOptions = { showLegend: true, smooth: false, showPoints: false, connectNulls: false, gridlines: true, zeroBase: true, logScale: false }
 
+
 // Legend hide is keyed by the cut (comboLabel) when split — so hiding a cut applies
 // to every metric and survives switching metrics — otherwise by the metric's own key.
 const hideKey = (s: UISeries) => s.comboLabel ?? s.key
@@ -34,7 +35,12 @@ export interface ChartViewProps {
   onDimensionSetAll: (k: string, on: boolean) => void
   onDimensionToggleSplit: (k: string) => void
   onAllToggle: (on: boolean) => void; onAddDimension: () => void
+  // Blocking: there is nothing to draw (the split was refused). Replaces the chart body.
   splitNotice?: string | null
+  // Advisory: the chart DID render, but not every series is on it (over SERIES_CAP, biggest
+  // kept). Must not replace the chart — it sits above it, or the cap would blank the very
+  // chart it just successfully trimmed to fit.
+  splitInfo?: string | null
   metrics: UIMetric[]; metricSearch: string; onMetricSearchChange: (v: string) => void
   onMetricToggle: (id: string) => void; onMetricsToggleAll: (on: boolean) => void
   onOpenMetricSettings: (id: string) => void; onAddMetric: () => void
@@ -127,7 +133,7 @@ export function ChartView(p: ChartViewProps) {
     return (
       <button key={s.key} type="button" onClick={() => toggleHidden(hideKey(s))} title={off ? 'Click to show' : 'Click to hide'}
         className={'flex items-center gap-1.5 text-[12px] transition ' + (off ? 'text-slate-400 line-through opacity-50' : 'text-slate-600 hover:text-slate-900')}>
-        <span className="h-[3px] w-4 rounded-full" style={{ background: off ? '#cbd5e1' : s.color }} />{text}
+        <span className="h-[3px] w-4 shrink-0 rounded-full" style={{ background: off ? '#cbd5e1' : s.color }} />{text}
       </button>
     )
   }
@@ -218,6 +224,9 @@ export function ChartView(p: ChartViewProps) {
       <div className="flex min-h-0 flex-1">
         <main className="relative flex min-w-0 flex-1 flex-col bg-white p-4">
           {maControl && <div className="absolute left-4 top-3 z-10">{maControl}</div>}
+          {p.splitInfo && !p.error && !p.splitNotice && (
+            <div className="mb-1.5 shrink-0 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-center text-[12px] text-amber-700">{p.splitInfo}</div>
+          )}
           {opts.showLegend && <div className="mb-1 flex items-center justify-center">{legend}</div>}
           <div className="min-h-0 w-full flex-1">
             {fullscreen ? <div className="flex h-full items-center justify-center text-[13px] text-slate-400">Chart is in fullscreen.</div> : chartBody}

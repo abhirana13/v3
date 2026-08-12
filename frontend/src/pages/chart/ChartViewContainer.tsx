@@ -6,10 +6,27 @@ import type { MetricDraft } from './MetricSettingsModal'
 import type { ChartRow, UIDimension, UIMetric, UISeries } from '../../components/types'
 import { decodeSelection, encodeSelection, loadChartView, saveChartView } from './viewState'
 import { naturalCompare } from './transforms'
+import { SERIES_COLORS, maxSeries } from '../../charts/palette'
 
-const PALETTE = ['#38bdf8', '#a855f7', '#16a34a', '#f59e0b', '#ef4444', '#14b8a6', '#6366f1', '#ec4899', '#0ea5e9', '#84cc16']
+// Series colours live in charts/palette.ts — shared with dashboard widgets so one chart is the
+// same colours wherever it's drawn. This view draws no target line, so the full 20 are available.
+const PALETTE = SERIES_COLORS
 const GRAN: Record<string, string> = { Day: 'day', Week: 'week', Month: 'month' }
-const SERIES_CAP = 20 // max series when splitting (per-dimension AND cross-dimension)
+// Max series DRAWN when splitting. Applied to the combos ACTUALLY PRESENT in the response,
+// not to a pre-flight guess: this used to cap `∏ dimension.values.length`, i.e. every value the
+// dimension has ever held, multiplied across split dims. Since the value lists are fetched once
+// per chart mount with no date range, a dimension with 30 all-time values but 8 in the picked
+// window still counted 30 — and two such dims multiplied to 900 against a real 20-odd series.
+// Splits that would render fine were refused, and the notice's "filter values down" advice was
+// impossible to act on, because the window had already done the filtering.
+//
+// Derived from the palette rather than written as 20, so the two cannot drift: the cap IS "one
+// series per available colour", which is what keeps a colour from ever being reused in a chart.
+const SERIES_CAP = maxSeries()
+// Pre-flight bound on the SAME over-estimate, kept only to stop an absurd payload (splitting by
+// something near-unique would pull every row before the frontend could count anything). High
+// enough that no legitimate dimension reaches it; the real cap is applied post-response.
+const COMBO_GUARD = 2000
 const todayMinus = (n: number) => { const d = new Date(); d.setDate(d.getDate() - n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
 const stripBrackets = (f: string) => f.replace(/[[\]]/g, '').trim()
 const isoOf = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -56,6 +73,9 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   const [chartData, setChartData] = useState<ChartRow[]>([])
   const [chartSeries, setChartSeries] = useState<UISeries[]>([])
   const [splitNotice, setSplitNotice] = useState<string | null>(null)
+  // Set only when the chart rendered with some series trimmed off (see SERIES_CAP) — advisory,
+  // so it must never take the place of the chart the way splitNotice does.
+  const [splitInfo, setSplitInfo] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [backpopBusy, setBackpopBusy] = useState(false)
@@ -208,6 +228,9 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
   /* ---- fetch data whenever the query inputs change ---- */
   useEffect(() => {
     if (!cfg || !cfg.time_column) return
+    // Cleared on every path in: only a successful render that dropped series sets it, so a
+    // stale "20 largest of 47" can't survive a refetch that no longer trims anything.
+    setSplitInfo(null)
     const names = visibleMetrics.map((m) => m.name)
     if (names.length === 0) { setChartData([]); setChartSeries([]); setSplitNotice(null); setLoading(false); return }
 
@@ -226,14 +249,16 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
     const splitDims = dimensions.filter((d) => d.split && d.key !== xAxisDim)
     const groupBy = splitDims.map((d) => d.key)
 
-    // cross-dimension cap: product of each split dim's effective (post-filter) cardinality
+    // Payload guard only — an OVER-ESTIMATE by construction (all-time value lists, multiplied
+    // across dims), so it must never be the thing that decides whether a chart renders. That
+    // decision is made from the response, against SERIES_CAP. See COMBO_GUARD.
     const cardOf = (d: UIDimension) => {
       const sel = d.selected.length
       return sel > 0 && sel < d.values.length ? sel : d.values.length
     }
     const combos = splitDims.reduce((acc, d) => acc * Math.max(1, cardOf(d)), 1)
-    if (splitDims.length && combos > SERIES_CAP) {
-      setSplitNotice(`Splitting by ${splitDims.map((d) => d.label).join(' × ')} would create ${combos} series — over the ${SERIES_CAP}-series limit. Filter values down or deselect a dimension.`)
+    if (splitDims.length && combos > COMBO_GUARD) {
+      setSplitNotice(`Splitting by ${splitDims.map((d) => d.label).join(' × ')} could reach ${combos.toLocaleString()} combinations, too many to load at once. Narrow the date range, filter values down, or deselect a dimension.`)
       setChartData([]); setChartSeries([]); setError(null); setLoading(false)
       return
     }
@@ -300,43 +325,66 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       const sKey = (mKey: string, combo: string) => `${mKey}${combo}`
       const multi = visibleMetrics.length > 1
 
-      // Series order. This used to be order-of-first-appearance in the rows, which is the
-      // backend's (time bucket, dim) ordering — so the legend was governed by whichever
-      // cohorts happened to show up on the earliest day, e.g. "D2-D7, D8-D14, D0, D1,
-      // D15-D30, D360+, D31-D60". Now it follows the dimension's own value_order, the same
-      // setting the config page exposes, so the legend, the x-axis and the filter dropdowns
-      // all agree:
+      // Every combo that actually has a row in the window. This is the real series count — a
+      // dimension value with no data in the picked range never appears here, so it costs
+      // nothing against SERIES_CAP. With "hide zero" on it is stricter still: a combo whose
+      // metrics are all 0 is dropped server-side and so is not a series either.
+      const present: string[] = []
+      const seen = new Set<string>()
+      for (const r of plotRows) { const k = comboOf(r); if (!seen.has(k)) { seen.add(k); present.push(k) } }
+
+      // Per-combo total of the primary visible metric. Ranks series for the cap below, and is
+      // also the 'metric' value_order.
+      const rank = visibleMetrics[0]
+      const total = new Map<string, number>()
+      if (rank) for (const r of plotRows) {
+        const k = comboOf(r)
+        total.set(k, (total.get(k) ?? 0) + (Number(r[rank.name]) || 0))
+      }
+      const byTotal = (a: string, b: string) =>
+        (total.get(b) ?? 0) - (total.get(a) ?? 0) || naturalCompare(a, b)
+
+      // Over the cap: keep the BIGGEST series rather than an arbitrary slice, so what is
+      // dropped is what mattered least.
+      const dropped = Math.max(0, present.length - SERIES_CAP)
+      const order = (dropped ? [...present].sort(byTotal).slice(0, SERIES_CAP) : [...present])
+
+      // Series ORDER is a separate concern from which series survive: the kept set is sorted by
+      // the dimension's own value_order, so a 'natural' legend still reads D0, D1, D2-D7 ...
+      // rather than "whichever 20 were largest, largest first". This used to be
+      // order-of-first-appearance in the rows, i.e. the backend's (time bucket, dim) ordering —
+      // so the legend was governed by whichever cohorts happened to show up on the earliest
+      // day, e.g. "D2-D7, D8-D14, D0, D1, D15-D30, D360+, D31-D60". Now it follows the same
+      // setting the config page exposes, so legend, x-axis and filter dropdowns all agree:
       //   'natural' (default) -> D0, D1, D2-D7, D8-D14, D15-D30 ... (naturalCompare)
       //   'metric'            -> biggest series first
       // With several split dims the FIRST one is the primary grouping, so its setting wins.
-      const order: string[] = []
-      const seen = new Set<string>()
-      for (const r of plotRows) { const k = comboOf(r); if (!seen.has(k)) { seen.add(k); order.push(k) } }
-
       const primaryOrder = cfg.dimensions.find((d) => d.name === splitDims[0]?.key)?.value_order
-      if (primaryOrder === 'metric') {
-        const rank = visibleMetrics[0]
-        const total = new Map<string, number>()
-        if (rank) for (const r of plotRows) {
-          const k = comboOf(r)
-          total.set(k, (total.get(k) ?? 0) + (Number(r[rank.name]) || 0))
-        }
-        order.sort((a, b) => (total.get(b) ?? 0) - (total.get(a) ?? 0) || naturalCompare(a, b))
-      } else {
-        order.sort(naturalCompare)
-      }
+      order.sort(primaryOrder === 'metric' ? byTotal : naturalCompare)
+      setSplitInfo(
+        dropped
+          ? `Showing the ${SERIES_CAP} largest of ${present.length} series${rank ? ` by ${rank.name}` : ''} — ${dropped} smaller ${dropped === 1 ? 'one is' : 'ones are'} hidden. Filter values down or deselect a dimension to see them.`
+          : null,
+      )
 
       const series: UISeries[] = []
       let ci = 0
       for (const combo of order) for (const m of visibleMetrics) {
-        series.push({ key: sKey(m.key, combo), label: multi ? `${m.name} · ${combo}` : combo, color: PALETTE[ci++ % PALETTE.length], axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo })
+        series.push({ key: sKey(m.key, combo), label: multi ? `${m.name} · ${combo}` : combo, color: PALETTE[ci % PALETTE.length], axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo })
+        ci++
       }
       setChartSeries(series)
 
+      // Only the kept combos get written onto the row objects. A dropped combo has no series,
+      // so its keys would be dead weight on the render path — and at the cardinalities this cap
+      // exists for (country × days_since_install is 3,146 present combos) that is thousands of
+      // unused keys per date, handed to ECharts, to display 20.
+      const keptCombos = dropped ? new Set(order) : null
       const byDate = new Map<string, ChartRow>()
       for (const d of buckets) byDate.set(d, { date: d }) // seed the full window (gaps where no data)
       for (const r of plotRows) {
         const date = String(r[tc]); const combo = comboOf(r)
+        if (keptCombos && !keptCombos.has(combo)) continue
         let row = byDate.get(date)
         if (!row) { row = { date }; byDate.set(date, row) }
         for (const m of visibleMetrics) row[sKey(m.key, combo)] = (r[m.name] as number) ?? null
@@ -494,7 +542,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
       dateRange={{ start: dateRange.start, end: recencyEnd }} onDateRangeChange={(s, e) => setDateRange({ start: s, end: e })}
       dimensions={dimensions} allToggle={allToggle}
       onDimensionToggleValue={onDimensionToggleValue} onDimensionSetAll={onDimensionSetAll}
-      onDimensionToggleSplit={onDimensionToggleSplit} splitNotice={splitNotice}
+      onDimensionToggleSplit={onDimensionToggleSplit} splitNotice={splitNotice} splitInfo={splitInfo}
       onAllToggle={onAllToggle} onAddDimension={() => alert('Add dimension is configured in the Query Editor (Phase 9).')}
       metrics={metrics} metricSearch={metricSearch} onMetricSearchChange={setMetricSearch}
       onMetricToggle={onMetricToggle} onMetricsToggleAll={onMetricsToggleAll}

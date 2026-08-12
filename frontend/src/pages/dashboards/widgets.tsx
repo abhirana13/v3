@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ChartWidgetData, ChartWidgetConfig, NumberWidgetData, WidgetMetricSel } from '../../api/types'
 import { naturalCompare } from '../chart/transforms'
+import { TARGET_LINE_COLOR, maxSeries, seriesColor } from '../../charts/palette'
 
 /* Widget cards for the dashboard grid, ported from the Claude Design handoff
    (dashboard.jsx): WidgetChrome + NumberWidget + ChartWidgetCard. Dumb — data
@@ -146,13 +147,13 @@ export function NumberWidget({ title, data, loading, error, onExpand, leading, t
 
 /* ---------- chart card ---------- */
 
-const PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#0ea5e9', '#84cc16', '#f97316', '#14b8a6', '#a855f7']
+// Colours come from charts/palette.ts, shared with the chart view — these used to be a DIFFERENT
+// ten-colour list, so the same chart was coloured one way here and another way on its own page.
 const SEP = ''
-const MAX_SERIES = 20
 
 interface BuiltSeries { name: string; metric: string; data: (number | null)[] }
 
-function buildSeries(data: ChartWidgetData): { dates: string[]; series: BuiltSeries[]; truncated: boolean } {
+function buildSeries(data: ChartWidgetData, cap: number): { dates: string[]; series: BuiltSeries[]; truncated: boolean } {
   const timeCol = data.time_column
   const dimCols = data.dimension_columns
   // naturalCompare, not .sort(): a widget on a PIVOTED chart puts a dimension value in
@@ -177,8 +178,11 @@ function buildSeries(data: ChartWidgetData): { dates: string[]; series: BuiltSer
     }
   }
   const all = [...byKey.values()]
-  const truncated = all.length > MAX_SERIES
-  const series = all.slice(0, MAX_SERIES).map((s) => ({
+  // `cap` is one series per AVAILABLE colour (see charts/palette.ts) — 19 rather than 20 when a
+  // target line has claimed the reserved amber. Truncating is the honest failure here: the widget
+  // surfaces it via infoText, whereas wrapping the palette would draw two series identically.
+  const truncated = all.length > cap
+  const series = all.slice(0, cap).map((s) => ({
     name: s.combo ? `${s.metric} · ${s.combo}` : s.metric,
     metric: s.metric,
     data: s.values,
@@ -204,7 +208,13 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
   // a chart whose data arrived first would stay blank
   const [inited, setInited] = useState(0)
 
-  const built = useMemo(() => (data && data.rows.length ? buildSeries(data) : null), [data])
+  // A target line claims the reserved amber, so it also lowers how many series may be drawn.
+  const hasTarget = config.target != null
+  const seriesCap = maxSeries(hasTarget)
+  const built = useMemo(
+    () => (data && data.rows.length ? buildSeries(data, seriesCap) : null),
+    [data, seriesCap],
+  )
   const asOf = data && data.from_date ? `${data.from_date} → ${data.to_date}` : undefined
 
   // init + keep sized to the grid cell (react-grid-layout resizes the cell).
@@ -275,14 +285,17 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
         data: s.data,
         yAxisIndex: hasSecondary && metricAxis.get(s.metric) === 'secondary' ? 1 : 0,
         symbol: 'circle', symbolSize: 3, showSymbol: false,
-        lineStyle: { width: 1.6, color: PALETTE[i % PALETTE.length] },
-        itemStyle: { color: PALETTE[i % PALETTE.length] },
+        lineStyle: { width: 1.6, color: seriesColor(i, hasTarget) },
+        itemStyle: { color: seriesColor(i, hasTarget) },
+        // 2.6px on hover-focus, matching the chart view — with 20 similar hues on one plot,
+        // thickening the focused line is how you confirm which series the tooltip describes.
+        emphasis: { focus: 'series' as const, lineStyle: { width: 2.6 } },
         connectNulls: false,
         ...(i === 0 && config.target != null
           ? {
               markLine: {
                 silent: true, symbol: 'none',
-                lineStyle: { color: '#f59e0b', type: 'dashed', width: 1.2 },
+                lineStyle: { color: TARGET_LINE_COLOR, type: 'dashed', width: 1.2 },
                 label: { formatter: compactNum(config.target), position: 'insideEndTop', color: '#d97706', fontSize: 10 },
                 data: [{ yAxis: config.target }],
               },
@@ -297,7 +310,7 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
       title={title + (config.target != null ? ` (target: ${compactNum(config.target)})` : '')}
       asOf={asOf}
       onExpand={onExpand}
-      infoText={built?.truncated ? `showing first ${MAX_SERIES} series` : undefined}
+      infoText={built?.truncated ? `showing first ${seriesCap} series` : undefined}
       leading={leading}
       trailing={trailing}
     >
