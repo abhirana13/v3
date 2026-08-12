@@ -17,12 +17,13 @@ platform (same value repeated across platforms by definition):
   6/14: US/AND (1300, 700), US/IOS (1300, 380), UK/AND (100, 20), UK/IOS (100, 5)
 
 Day totals (dau deduped per country via MAX over platform, then summed;
-revenue plain-summed; rev_per_dau = revenue/dau rounded to 4 decimals):
+revenue plain-summed; rev_per_dau = revenue/dau at FULL PRECISION — `decimals` is a
+display setting and serving no longer rounds by it):
 
   date   dau                revenue  rev_per_dau
-  6/07   1000               800      0.8000
-  6/13   1200+50   = 1250   950      0.7600
-  6/14   1300+100  = 1400   1105     0.7893   (1105/1400 = 0.78928…)
+  6/07   1000               800      0.8                   (exact)
+  6/13   1200+50   = 1250   950      0.76                  (exact)
+  6/14   1300+100  = 1400   1105     0.7892857142857143    (1105/1400, non-terminating)
 
 fake today = 2026-06-16, dashboard offset 2 → as_of = 2026-06-14.
 """
@@ -161,18 +162,25 @@ def test_independent_metric_deduped_not_summed(client, seeded_chart, dash, fake_
 
 
 def test_formula_metric_tile(client, seeded_chart, dash, fake_today):
-    """rev_per_dau = revenue / dau, evaluated on the deduped day totals and
-    rounded to the metric's 4 decimals — same as the chart would plot."""
+    """rev_per_dau = revenue / dau on the deduped day totals, at FULL PRECISION — same as
+    the chart would plot.
+
+    The expectations are written as arithmetic rather than decimal literals on purpose. This
+    test used to assert 0.7893, i.e. 1105/1400 rounded to the metric's `decimals`, which is
+    precisely the behaviour that made small ratios plot as flat stepped lines. `decimals` is
+    applied at render time now, so the API returns the undivided truth and a literal here
+    would silently re-pin the old bug.
+    """
     w = add_tile(client, dash, seeded_chart, {"metric": "rev_per_dau", "decimals": 4})
     body = tile_data(client, dash, w)
 
-    assert body["value"] == pytest.approx(0.7893)  # 1105/1400 rounded
-    prev = body["compares"]["previous_day"]  # vs 0.7600
-    assert prev["abs"] == pytest.approx(0.0293)
-    assert prev["pct"] == pytest.approx((0.7893 / 0.76 - 1) * 100)
-    lw = body["compares"]["last_week"]  # vs 0.8000
-    assert lw["abs"] == pytest.approx(-0.0107)
-    assert lw["pct"] == pytest.approx((0.7893 / 0.8 - 1) * 100)
+    assert body["value"] == pytest.approx(1105 / 1400)  # 0.78928571…, NOT 0.7893
+    prev = body["compares"]["previous_day"]  # vs 950/1250 = 0.76 exactly
+    assert prev["abs"] == pytest.approx(1105 / 1400 - 0.76)
+    assert prev["pct"] == pytest.approx(((1105 / 1400) / 0.76 - 1) * 100)
+    lw = body["compares"]["last_week"]  # vs 800/1000 = 0.8 exactly
+    assert lw["abs"] == pytest.approx(1105 / 1400 - 0.8)
+    assert lw["pct"] == pytest.approx(((1105 / 1400) / 0.8 - 1) * 100)
 
 
 def test_tile_widget_filters_and_zero_prev(client, seeded_chart, dash, fake_today):

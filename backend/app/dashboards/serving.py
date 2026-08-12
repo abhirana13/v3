@@ -19,7 +19,7 @@ from app.dashboards.schemas import ChartWidgetConfig, NumberWidgetConfig
 from app.derived_dims import effective_dimensions
 from app.models import Chart
 from app.schemas import DataRequest
-from app.serving import _natural_key, dimension_values, serve_data
+from app.serving import _natural_key, dimension_values, serve_data, usable_default_x_axis
 
 # compare name -> how many days before the as-of date its reference value sits
 # (last_week = same weekday, 7 days prior — the WoW convention)
@@ -47,12 +47,22 @@ def merge_filters(chart: Chart, global_filters: dict, widget_filters: dict) -> t
     """
     servable = {d.name for d in effective_dimensions(chart, cache_present_columns(chart))}
 
+    empty_selection = False
+
     merged: dict[str, list] = {}
     for dim, values in (global_filters or {}).items():
-        if values and dim in servable:
-            merged[dim] = list(values)
+        if dim not in servable:
+            continue
+        if not values:
+            # An EXPLICITLY empty global selection means "none of this dimension's values",
+            # i.e. no rows — the filter bar's None button. Previously any falsy list was just
+            # skipped, which silently widened the selection back to everything, so None was
+            # indistinguishable from All. The frontend only ever sends an empty list when the
+            # user has actually cleared the chip (an untouched chip omits the key entirely).
+            empty_selection = True
+            continue
+        merged[dim] = list(values)
 
-    empty_selection = False
     for dim, values in (widget_filters or {}).items():
         if not values:
             continue
@@ -71,12 +81,24 @@ def resolve_window(
     offset_days: int | None,
     from_date: date | None,
     to_date: date | None,
+    global_offset: int | None = None,
 ) -> tuple[date, date]:
     """The widget's effective [from, to]. The offset (widget's own, else the
     dashboard default) caps the END date at today − offset ('only_on_end_date'
     mode: a requested from_date passes through untouched). With no dates given,
     the window is the dashboard's default_date_range_days ending at the cap."""
-    offset = offset_days if offset_days is not None else dashboard.default_end_offset_days
+    # Precedence: the widget's own offset, then the viewer's global control, then the
+    # dashboard's stored default. `global_offset` is what the dashboard's recency dropdown sends;
+    # it REPLACES the stored default rather than capping on top of it, so the control can loosen
+    # the window as well as tighten it. A widget with its own explicit offset still wins — that
+    # is a deliberate per-widget setting, not a default.
+    offset = (
+        offset_days
+        if offset_days is not None
+        else global_offset
+        if global_offset is not None
+        else dashboard.default_end_offset_days
+    )
     cap = _today() - timedelta(days=offset)
     to_eff = min(to_date, cap) if to_date else cap
     from_eff = from_date or (to_eff - timedelta(days=dashboard.default_date_range_days - 1))
@@ -90,12 +112,51 @@ def _dim_columns(chart: Chart, dim_names: list[str]) -> list[str]:
     return [by_name.get(d, d) for d in dim_names]
 
 
-def _empty_response(chart: Chart, widget: Widget, from_date, to_date, granularity, dims, metrics):
+def _dim_value_order(chart: Chart, dim_names: list[str]) -> list[str]:
+    """Each grouped dimension's `value_order`, aligned with _dim_columns.
+
+    The widget renderer needs this to order its series the way the chart page does. Without it
+    a widget legend fell back to the order rows happened to arrive in — the backend's
+    (time bucket, dim) ordering — so it read "D2-D7, D8-D14, D0, D1, D360+" while the same
+    chart on its own page read D0, D1, D2-D7 ... That was the bug the chart page fixed in
+    07ad67f; the widget renderer never got the information it needed to do the same.
+    """
+    by_name = {d.name: getattr(d, "value_order", "natural") for d in effective_dimensions(chart, cache_present_columns(chart))}
+    return [by_name.get(d, "natural") for d in dim_names]
+
+
+def _metric_format(chart: Chart, metric_names: list[str]) -> dict:
+    """Each requested metric's display shape: {name: {"unit": .., "decimals": ..}}.
+
+    A widget tooltip had no way to format its own values — it fell back to ECharts' default, so
+    a revenue widget showed a raw float with no '$' while the same metric on the chart page was
+    formatted from these exact fields. Keyed by name rather than positional so it cannot drift
+    out of step with `metrics`.
+    """
+    by_name = {m.name: m for m in chart.metrics}
+    out = {}
+    for n in metric_names:
+        m = by_name.get(n)
+        if m is not None:
+            out[n] = {"unit": m.unit, "decimals": m.decimals}
+    return out
+
+
+def _empty_response(chart: Chart, widget: Widget, from_date, to_date, granularity, dims, metrics, x_axis=None):
+    # x_axis is reported even with no rows: the frontend builds the widget's "open the source
+    # chart" link from this response, and omitting it made an empty widget link to a plain time
+    # series even when the chart pivots — a link that quietly disagrees with the widget beside it.
+    x_axis_col = _dim_columns(chart, [x_axis])[0] if x_axis else None
     return {
         "widget_id": widget.id,
         "chart_id": chart.id,
         "time_column": chart.time_column,
         "dimension_columns": _dim_columns(chart, dims),
+        "dimension_value_order": _dim_value_order(chart, dims),
+        "x_axis": x_axis,
+        "x_axis_column": x_axis_col,
+        "filters_effective": {},
+        "metric_format": _metric_format(chart, metrics),
         "from_date": from_date,
         "to_date": to_date,
         "granularity": granularity,
@@ -115,9 +176,10 @@ def chart_widget_data(
     granularity: str,
     global_filters: dict,
     extra_group_by=(),
+    global_offset: int | None = None,
 ) -> dict:
     cfg = ChartWidgetConfig.model_validate(widget.config)
-    from_eff, to_eff = resolve_window(dashboard, cfg.offset_days, from_date, to_date)
+    from_eff, to_eff = resolve_window(dashboard, cfg.offset_days, from_date, to_date, global_offset)
     merged, empty_selection = merge_filters(chart, global_filters, cfg.filters)
     metric_names = [m.name for m in cfg.metrics]
 
@@ -130,15 +192,28 @@ def chart_widget_data(
         if d in servable and d not in group_by:
             group_by.append(d)
 
+    # A widget with no x_axis of its own (or the legacy "time" placeholder) INHERITS the chart's
+    # saved axis, so a pivoted chart stays pivoted in a dashboard. This was hardcoded to a plain
+    # time series: the same chart returned cohort buckets on its own page and dates in a widget.
+    #
+    # Resolved BEFORE the empty-selection return so the empty response reports the same axis a
+    # populated one would; the deep link is built from this response either way.
+    x_axis = (
+        usable_default_x_axis(chart)
+        if cfg.x_axis is None or cfg.x_axis == "time"
+        else cfg.x_axis
+    )
+
     if empty_selection:
         return _empty_response(
-            chart, widget, from_eff, to_eff, granularity, group_by, metric_names
+            chart, widget, from_eff, to_eff, granularity, group_by, metric_names, x_axis
         )
 
     req = DataRequest(
         from_date=from_eff,
         to_date=to_eff,
         granularity=granularity,
+        x_axis=x_axis,
         dimensions=group_by,
         metrics=metric_names,
         filters=merged,
@@ -146,7 +221,23 @@ def chart_widget_data(
     result = serve_data(chart, req)
     result["widget_id"] = widget.id
     result["time_column"] = chart.time_column
-    result["dimension_columns"] = _dim_columns(chart, group_by)
+    # Derive from the EFFECTIVE dims serve_data grouped by, not from the widget's group_by:
+    # when pivoting, serving prepends the x_axis dimension itself, so a widget with an empty
+    # group_by still gets rows keyed on that dimension. Using group_by here reported no
+    # dimension columns at all and the renderer had nothing to key rows on.
+    eff_dims = result.get("dimensions") or []
+    result["dimension_columns"] = _dim_columns(chart, eff_dims)
+    result["dimension_value_order"] = _dim_value_order(chart, eff_dims)
+    # The COLUMN the x-axis lives in (None => rows are keyed on time_column), so the frontend
+    # never has to map dimension name -> column itself.
+    result["x_axis_column"] = (
+        _dim_columns(chart, [result["x_axis"]])[0] if result.get("x_axis") else None
+    )
+    result["metric_format"] = _metric_format(chart, metric_names)
+    # The filters actually applied, after the global/widget cascade. Handed back so the
+    # "open the source chart" link can reproduce EXACTLY these cuts — re-deriving the merge in
+    # the frontend would duplicate merge_filters' intersection rule and drift from it.
+    result["filters_effective"] = merged
     return result
 
 
@@ -156,6 +247,7 @@ def number_widget_data(
     chart: Chart,
     to_date: date | None,
     global_filters: dict,
+    global_offset: int | None = None,
 ) -> dict:
     """value at the as-of date + deltas vs previous day and last week (same
     weekday, 7 days prior).
@@ -166,7 +258,7 @@ def number_widget_data(
     would plot for that day. Deltas: abs = v − v_prev, pct = (v/v_prev − 1)·100;
     null when either side is missing, pct also null when v_prev is 0."""
     cfg = NumberWidgetConfig.model_validate(widget.config)
-    _, as_of = resolve_window(dashboard, cfg.offset_days, None, to_date)
+    _, as_of = resolve_window(dashboard, cfg.offset_days, None, to_date, global_offset)
     merged, empty_selection = merge_filters(chart, global_filters, cfg.filters)
 
     out = {
@@ -217,7 +309,15 @@ def filter_values(dashboard: Dashboard) -> dict:
     """Options for the global filter-bar chips: for each configured filter
     dimension, the distinct cached values UNIONED across every distinct source
     chart on the dashboard that has that dimension (charts without it simply
-    don't contribute — same rule as the cascade itself)."""
+    don't contribute — same rule as the cascade itself).
+
+    ORDER follows each dimension's own `value_order`. This used to collect into a set and then
+    re-sort by _natural_key unconditionally, which discarded a 'metric' ordering entirely and
+    made every dropdown alphabetical. It also disagreed with the dashboard's own EDIT mode,
+    which builds its options from per-chart dimension_values and so kept `value_order` — so the
+    same dropdown listed countries by volume while editing and alphabetically while viewing.
+    See the note at the return for how the two orderings union differently.
+    """
     wanted = [f.dimension for f in dashboard.filters]
     if not wanted:
         return {"values": {}}
@@ -227,10 +327,32 @@ def filter_values(dashboard: Dashboard) -> dict:
         for w in tab.widgets:
             charts[w.source_chart_id] = w.source_chart
 
-    merged: dict[str, set] = {d: set() for d in wanted}
+    merged: dict[str, list] = {d: [] for d in wanted}
+    seen: dict[str, set] = {d: set() for d in wanted}
+    order_of: dict[str, str] = {}
     for chart in charts.values():
         chart_vals = dimension_values(chart)["dimensions"]
+        vo = {
+            d.name: getattr(d, "value_order", "natural")
+            for d in effective_dimensions(chart, cache_present_columns(chart))
+        }
         for d in wanted:
-            if d in chart_vals:
-                merged[d].update(chart_vals[d])
-    return {"values": {d: sorted(merged[d], key=_natural_key) for d in wanted}}
+            if d not in chart_vals:
+                continue
+            order_of.setdefault(d, vo.get(d, "natural"))
+            for v in chart_vals[d]:
+                if v not in seen[d]:
+                    seen[d].add(v)
+                    merged[d].append(v)
+
+    # 'metric' order can only be honoured by keeping arrival order — the values come out of
+    # dimension_values() biggest-first per chart, and there is no way to re-derive a combined
+    # ranking here without re-querying every cache. 'natural' is re-sorted over the whole union
+    # instead: sorting is well defined globally, and first-seen would otherwise give the odd
+    # "chart 1's values in order, then chart 2's leftovers" for a plain alphabetical dimension.
+    return {
+        "values": {
+            d: merged[d] if order_of.get(d) == "metric" else sorted(merged[d], key=_natural_key)
+            for d in wanted
+        }
+    }

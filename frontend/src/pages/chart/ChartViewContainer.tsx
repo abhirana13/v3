@@ -5,6 +5,8 @@ import { ChartView } from './ChartView'
 import type { MetricDraft } from './MetricSettingsModal'
 import type { ChartRow, UIDimension, UIMetric, UISeries } from '../../components/types'
 import { decodeSelection, encodeSelection, loadChartView, saveChartView } from './viewState'
+import type { SavedChartView } from './viewState'
+import type { ChartViewSeed } from './urlState'
 import { naturalCompare } from './transforms'
 import { SERIES_COLORS, maxSeries } from '../../charts/palette'
 
@@ -52,8 +54,46 @@ const dateBuckets = (startISO: string, endISO: string, gran: string): string[] =
   return out
 }
 
-export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, onEditChart, onCreateChart }: {
+
+/* URL-carried cuts, expressed in the SAME shape as the remembered view state.
+ *
+ * Merging into that shape rather than threading the seed through every setter below means the
+ * hydration block stays exactly as it was — the seed simply wins where it says something. A
+ * dimension named in `split`/`filters` is fully described by the seed, so its remembered split
+ * and selection are BOTH replaced; naming a split without a filter must not inherit a stale
+ * narrowing from whatever the viewer last looked at.
+ */
+function seededView(saved: SavedChartView | null, seed?: ChartViewSeed | null): SavedChartView | null {
+  if (!seed) return saved
+  const base: SavedChartView = saved ?? { v: 1, ts: Date.now() }
+  const dims = { ...(base.dims || {}) }
+  const named = new Set([...(seed.split || []), ...Object.keys(seed.filters || {})])
+  for (const d of named) {
+    const vals = seed.filters?.[d]
+    dims[d] = {
+      split: (seed.split || []).includes(d),
+      sel: vals && vals.length ? vals.map(String) : 'all',
+    }
+  }
+  // every OTHER dimension is un-split: the seed describes the full set of cuts, so a leftover
+  // split from the viewer's last visit would add a series the widget never showed
+  if (seed.split) for (const d of Object.keys(dims)) if (!named.has(d)) dims[d] = { ...dims[d], split: false }
+  return {
+    ...base,
+    dims,
+    metrics: seed.metrics ?? base.metrics,
+    from: seed.from ?? base.from,
+    to: seed.to ?? base.to,
+    granularity: seed.granularity ?? base.granularity,
+    xAxis: seed.xAxis === undefined ? base.xAxis : (seed.xAxis === '' ? null : seed.xAxis),
+  }
+}
+
+export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoHome, onEditChart, onCreateChart }: {
   chartId: number
+  // cuts carried in the URL (a dashboard widget's "open the source chart" link). Takes precedence
+  // over the viewer's remembered state for this load — see seededView().
+  seed?: ChartViewSeed | null
   charts: { id: number; name: string; number?: number | null; certified?: boolean }[]
   onSelectChart: (id: number) => void
   onGoHome: () => void
@@ -115,7 +155,7 @@ export function ChartViewContainer({ chartId, charts, onSelectChart, onGoHome, o
         // Restore what the user last had on this chart (browser-only, see viewState.ts).
         // Everything below falls back to the chart's configured defaults when absent, and
         // anything naming a dimension/metric/value that no longer exists is dropped.
-        const saved = loadChartView(chartId)
+        const saved = seededView(loadChartView(chartId), seed)
         setCfg(dm)
         setAllDimValues(dv.dimensions || {})
         // `included: false` => configured but hidden here (the config page still lists it,

@@ -82,14 +82,22 @@ export function TabBar({ tabs, activeId, onTabChange }: {
 
 const GRAN_LABEL: Record<string, string> = { day: 'Day', week: 'Week', month: 'Month' }
 
-export function ControlsRow({ granularity, dateRange, movingAvg, onGranularityChange, onDateRangeChange, onToggleMovingAvg }: {
-  granularity: string; dateRange: DateRange; movingAvg: boolean
+const OFFSETS = [0, 1, 2, 3, 7, 14]
+
+export function ControlsRow({ granularity, dateRange, movingAvg, endOffset, onGranularityChange, onDateRangeChange, onToggleMovingAvg, onEndOffsetChange }: {
+  granularity: string; dateRange: DateRange; movingAvg: boolean; endOffset: number
   onGranularityChange: (g: string) => void; onDateRangeChange: (r: DateRange) => void; onToggleMovingAvg: (on: boolean) => void
+  onEndOffsetChange: (n: number) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [offOpen, setOffOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const offRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      if (offRef.current && !offRef.current.contains(e.target as Node)) setOffOpen(false)
+    }
     document.addEventListener('mousedown', h)
     return () => document.removeEventListener('mousedown', h)
   }, [])
@@ -119,6 +127,26 @@ export function ControlsRow({ granularity, dateRange, movingAvg, onGranularityCh
           )}
         </div>
         <DateRangePicker value={dateRange} onChange={onDateRangeChange} align="right" />
+        {/* Recency cap, matching the chart view's control: data is never loaded more recently
+            than today - offset, whatever the picked end date says. Seeded from the dashboard's
+            default_end_offset_days; changing it here is view-only and not persisted. */}
+        <div ref={offRef} className="relative">
+          <button onClick={() => setOffOpen(!offOpen)}
+            title="Load data up to this many days before today"
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-600 hover:border-slate-300">
+            {endOffset}<Ic.caret className="text-slate-400" />
+          </button>
+          {offOpen && (
+            <div className="absolute right-0 top-full z-30 mt-1 w-32 rounded-md border border-slate-200 bg-white py-1 shadow-lg">
+              {OFFSETS.map((n) => (
+                <button key={n} onClick={() => { setOffOpen(false); onEndOffsetChange(n) }}
+                  className={'block w-full px-3 py-1.5 text-left text-[13px] hover:bg-slate-50 ' + (n === endOffset ? 'font-semibold text-sky-600' : 'text-slate-600')}>
+                  {n === 0 ? 'today' : `${n} day${n === 1 ? '' : 's'} back`}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -129,7 +157,12 @@ export function ControlsRow({ granularity, dateRange, movingAvg, onGranularityCh
 export interface FilterChipState {
   dimension: string
   options: FilterValue[]
-  selected: FilterValue[] // narrowed subset; empty = All (no value constraint)
+  // null  => All: no value constraint. Distinct from [] so that "everything" survives the
+  //           async options fetch (a chip created before its options land is All, not None) and
+  //           so a saved default_values of [] keeps meaning All rather than blanking widgets.
+  // []    => None: explicitly no values. The backend turns this into an empty result set.
+  // list  => a partial selection.
+  selected: FilterValue[] | null
   split: boolean          // unchecked chip => split every chart widget by this dimension
 }
 
@@ -149,7 +182,7 @@ export interface ChipDrag {
 //    so an All chip shows every value checked and unchecking one narrows.
 export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove, drag }: {
   chip: FilterChipState
-  onFilterChange: (dim: string, values: FilterValue[]) => void
+  onFilterChange: (dim: string, values: FilterValue[] | null) => void
   onToggleSplit: (dim: string) => void
   onRemove?: (dim: string) => void // edit mode: delete this chip from the dashboard
   drag?: ChipDrag // edit mode: drag-to-reorder
@@ -162,20 +195,22 @@ export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove, drag
     return () => document.removeEventListener('mousedown', h)
   }, [])
   const total = chip.options.length
-  const sel = chip.selected.length
-  const all = sel === 0
-  const badge = chip.split ? (all ? 'Split' : `Split · ${sel}`) : (all ? 'All' : String(sel))
-  const isSel = (v: FilterValue) => all || chip.selected.some((x) => x === v)
+  // Mirrors the chart view's chip: every box ticked = All, none ticked = None. Ticks read from
+  // `selected`, with null standing in for "all ticked".
+  const isAll = chip.selected === null || (total > 0 && chip.selected.length === total)
+  const isNone = chip.selected !== null && chip.selected.length === 0
+  const sel = chip.selected === null ? total : chip.selected.length
+  const badge = chip.split
+    ? (isAll ? 'Split' : isNone ? 'Split · none' : `Split · ${sel}`)
+    : (isAll ? 'All' : isNone ? 'None' : String(sel))
+  const isSel = (v: FilterValue) => (chip.selected === null ? true : chip.selected.some((x) => x === v))
   const toggleVal = (v: FilterValue) => {
-    if (all) {
-      // first uncheck from "All" materializes the full set minus this value
-      onFilterChange(chip.dimension, chip.options.filter((o) => o !== v))
-    } else {
-      const has = chip.selected.some((x) => x === v)
-      const next = has ? chip.selected.filter((x) => x !== v) : [...chip.selected, v]
-      // re-selecting everything collapses back to All (empty)
-      onFilterChange(chip.dimension, total > 0 && next.length === total ? [] : next)
-    }
+    const cur = chip.selected === null ? chip.options : chip.selected
+    const has = cur.some((x) => x === v)
+    const next = has ? cur.filter((x) => x !== v) : [...cur, v]
+    // re-ticking everything collapses back to the All sentinel, so it persists as "no default"
+    // rather than as an explicit list that would freeze today's value set into the dashboard
+    onFilterChange(chip.dimension, total > 0 && next.length === total ? null : next)
   }
   return (
     <div ref={ref}
@@ -193,7 +228,7 @@ export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove, drag
       <Checkbox checked={!chip.split} onChange={() => onToggleSplit(chip.dimension)} />
       <button type="button" onClick={() => setOpen((o) => !o)} className="flex items-center gap-2">
         <span className="font-medium text-slate-700">{chip.dimension}</span>
-        <span className={'rounded px-1.5 py-[1px] text-[11px] font-semibold ' + (chip.split ? 'bg-violet-100 text-violet-700' : all ? 'bg-slate-100 text-slate-500' : 'bg-sky-100 text-sky-700')}>
+        <span className={'rounded px-1.5 py-[1px] text-[11px] font-semibold ' + (chip.split ? 'bg-violet-100 text-violet-700' : isAll ? 'bg-slate-100 text-slate-500' : isNone ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700')}>
           {badge}
         </span>
         <Ic.caret className="text-slate-400" />
@@ -208,8 +243,12 @@ export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove, drag
         <div className="absolute left-0 top-[calc(100%+6px)] z-30 w-56 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
           <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Filter values</span>
-            <button type="button" className="text-[11px] font-semibold text-sky-600 hover:underline disabled:text-slate-300"
-              disabled={all} onClick={() => onFilterChange(chip.dimension, [])}>All</button>
+            <div className="flex gap-2 text-[11px] font-semibold text-sky-600">
+              <button type="button" className="hover:underline disabled:text-slate-300"
+                disabled={isAll} onClick={() => onFilterChange(chip.dimension, null)}>All</button>
+              <button type="button" className="hover:underline disabled:text-slate-300"
+                disabled={isNone} onClick={() => onFilterChange(chip.dimension, [])}>None</button>
+            </div>
           </div>
           <div className="max-h-60 overflow-y-auto py-1">
             {total === 0 && <div className="px-3 py-2 text-[12px] text-slate-400">No values in cache</div>}
@@ -231,7 +270,7 @@ export function FilterChip({ chip, onFilterChange, onToggleSplit, onRemove, drag
 export function GlobalFilterBar({ chips, dirty, onFilterChange, onToggleSplit, onApply }: {
   chips: FilterChipState[]
   dirty: boolean
-  onFilterChange: (dim: string, values: FilterValue[]) => void
+  onFilterChange: (dim: string, values: FilterValue[] | null) => void
   onToggleSplit: (dim: string) => void
   onApply: () => void
 }) {

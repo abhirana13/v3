@@ -132,13 +132,9 @@ def oracle_serve(columns, rows, config, request: dict) -> list[dict]:
         for mname in requested_base:
             row[mname] = base_values[mname]
         for fm in requested_formulas:
-            f = formula_by_name[fm]
-            val = eval_formula(f.formula, base_values)
-            if val is not None:
-                val = round(val, f.decimals)
-                if f.decimals == 0:
-                    val = int(val)
-            row[fm] = val
+            # Mirrors serving: full precision, no rounding. `decimals` is display-only, so the
+            # oracle must not round either or it would re-introduce the bug it is checking for.
+            row[fm] = eval_formula(formula_by_name[fm].formula, base_values)
         out.append(row)
 
     if request.get("hide_zero") and requested_metrics:

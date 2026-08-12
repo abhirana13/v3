@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import { api } from './api/client'
 import type { ChartSummary } from './api/types'
+import { parseChartSeed } from './pages/chart/urlState'
 
 // Route-level code splitting: each view is its own async chunk so the heavy one
 // (ChartViewContainer pulls in ECharts) only downloads when that view is opened,
@@ -19,6 +20,9 @@ type View =
   | { name: 'dashboard'; id: number }
 
 export function App() {
+  // Read once, at init: the URL-sync effect below strips these params as soon as chartId is
+  // known, so anything reading them later (an effect in a lazily-mounted child) finds them gone.
+  const [chartSeed] = useState(() => parseChartSeed(window.location.search))
   const [charts, setCharts] = useState<ChartSummary[] | null>(null)
   const [chartId, setChartId] = useState<number | null>(null)
   const [view, setView] = useState<View>(() => {
@@ -123,6 +127,7 @@ export function App() {
     body = (
       <ChartViewContainer
         chartId={chartId}
+        seed={chartSeed}
         charts={charts.map((c) => ({ id: c.id, name: c.name, number: c.chart_number, certified: c.certified }))}
         onSelectChart={setChartId}
         onGoHome={() => setView({ name: 'home' })}

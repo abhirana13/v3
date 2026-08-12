@@ -24,10 +24,16 @@ import { EditWidgetModal, type WidgetPatch } from './EditWidgetModal'
 const toISO = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
 function defaultRange(dash: DashboardFull): DateRange {
+  // The picked END is today, matching the chart view — the recency offset does the capping
+  // (resolve_window takes min(picked end, today - offset)). This used to end at today - offset,
+  // which baked the offset into the picker and made the picker the binding constraint: choosing
+  // an offset SMALLER than the default then changed nothing, so the control could only tighten.
+  //
+  // START still counts back from the offset end, so the window spans exactly as much history as
+  // before — only the redundancy between the two controls is gone.
   const end = new Date()
-  end.setDate(end.getDate() - dash.default_end_offset_days)
   const start = new Date(end)
-  start.setDate(start.getDate() - (dash.default_date_range_days - 1))
+  start.setDate(start.getDate() - dash.default_end_offset_days - (dash.default_date_range_days - 1))
   return { start: toISO(start), end: toISO(end) }
 }
 
@@ -67,6 +73,15 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
   const [granularity, setGranularity] = useState('day')
   const [dateRange, setDateRange] = useState<DateRange | null>(null)
   const [movingAvg, setMovingAvg] = useState(false) // view-only 7-day trailing mean on chart widgets
+  // Recency cap, seeded from the dashboard's default_end_offset_days once it loads. Mirrors the
+  // chart view: a hard bound on how recent the data may be, applied on top of the picked end
+  // date. View-only — changing it never writes to the dashboard.
+  const [endOffset, setEndOffset] = useState<number | null>(null)
+
+  // The offset goes to the BACKEND rather than being applied to `to` here. Capping client-side
+  // could only ever pull the window earlier: resolve_window() clamps to today - offset using the
+  // dashboard's stored default, so picking a SMALLER offset than the default changed nothing and
+  // the control looked broken. Sent as offset_days, it replaces that default for this request.
 
   // filter bar: chips are the editable draft; appliedFilters is what widgets use.
   // Read mode commits via Apply; edit mode applies live and persists chip selections
@@ -98,7 +113,15 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
 
   const chipsToFilters = (list: FilterChipState[]): GlobalFilters => {
     const out: GlobalFilters = {}
-    for (const c of list) if (c.selected.length) out[c.dimension] = c.selected // empty = All (no constraint)
+    for (const c of list) {
+      if (c.selected === null) continue // All -> send no constraint at all
+      // Everything ticked is also All. Guard on options.length so a chip whose options have not
+      // arrived yet can't be mistaken for a full selection.
+      if (c.options.length > 0 && c.selected.length === c.options.length) continue
+      // A partial list narrows; an EMPTY list is the None button and the backend turns it into
+      // an empty result set (see merge_filters) rather than silently widening back to All.
+      out[c.dimension] = c.selected
+    }
     return out
   }
   const chipsToSplit = (list: FilterChipState[]): string[] => list.filter((c) => c.split).map((c) => c.dimension)
@@ -110,10 +133,14 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
     setDash(tree)
     setActiveTabId((cur) => (keepState && cur != null && tree.tabs.some((t) => t.id === cur) ? cur : tree.tabs[0]?.id ?? null))
     if (!keepState) setDateRange(defaultRange(tree))
+    setEndOffset((cur) => (cur === null ? tree.default_end_offset_days : cur))
     const built = tree.filters.map((f) => ({
       dimension: f.dimension,
       options: fv.values[f.dimension] || [],
-      selected: (f.default_values || []) as FilterValue[],
+      // A stored default of [] (or absent) is "no default" => All. Only a non-empty stored
+      // list is a real narrowing; mapping [] to null keeps old dashboards showing everything
+      // instead of reading as an explicit None and rendering empty widgets.
+      selected: (f.default_values && f.default_values.length ? (f.default_values as FilterValue[]) : null),
       split: false, // split is a live view toggle, not persisted
     }))
     setChips(built)
@@ -148,14 +175,14 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
       return next
     })
     for (const w of activeTab.widgets) {
-      api.getWidgetData(dash.id, w.id, { from: dateRange.start, to: dateRange.end, granularity, filters: appliedFilters, split: appliedSplit })
+      api.getWidgetData(dash.id, w.id, { from: dateRange.start, to: dateRange.end, granularity, filters: appliedFilters, split: appliedSplit, offsetDays: endOffset })
         .then((body) => {
           if (fetchToken.current !== token) return
           setDataById((prev) => ({ ...prev, [w.id]: w.type === 'chart' ? { loading: false, error: null, chart: body as ChartWidgetData } : { loading: false, error: null, number: body as NumberWidgetData } }))
         })
         .catch((e: any) => { if (fetchToken.current === token) setDataById((prev) => ({ ...prev, [w.id]: { loading: false, error: String(e.message || e) } })) })
     }
-  }, [editing, dash, activeTab, dateRange, granularity, appliedFilters, appliedSplit])
+  }, [editing, dash, activeTab, dateRange, granularity, appliedFilters, appliedSplit, endOffset])
 
   // ---------- EDIT-mode data fetch (preview posted configs) ----------
   // key excludes layout so dragging doesn't refetch; config/source/filters/dates do.
@@ -164,8 +191,9 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
     return JSON.stringify({
       ws: draftActiveTab.widgets.map((w) => ({ id: w.id, type: w.type, sc: w.source_chart_id, cfg: w.config })),
       f: appliedFilters, s: appliedSplit, from: dateRange.start, to: dateRange.end, g: granularity,
+      o: endOffset, // recency control is part of the request, so a change must refetch previews
     })
-  }, [editing, draftActiveTab, appliedFilters, appliedSplit, dateRange, granularity])
+  }, [editing, draftActiveTab, appliedFilters, appliedSplit, dateRange, granularity, endOffset])
 
   useEffect(() => {
     if (!editing || editDataKey == null) return
@@ -178,7 +206,7 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
       return next
     })
     for (const w of tab.widgets) {
-      api.previewWidgetData(dashboardId, { type: w.type, source_chart_id: w.source_chart_id, config: w.config, from: dateRange.start, to: dateRange.end, granularity, filters: appliedFilters, split: appliedSplit })
+      api.previewWidgetData(dashboardId, { type: w.type, source_chart_id: w.source_chart_id, config: w.config, from: dateRange.start, to: dateRange.end, granularity, filters: appliedFilters, split: appliedSplit, offsetDays: endOffset })
         .then((body) => {
           if (fetchToken.current !== token) return
           setDataById((prev) => ({ ...prev, [w.id]: w.type === 'chart' ? { loading: false, error: null, chart: body as ChartWidgetData } : { loading: false, error: null, number: body as NumberWidgetData } }))
@@ -200,7 +228,7 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
     else setDirty(true) // read: gated by Apply
   }, [editing])
 
-  const onFilterChange = useCallback((dim: string, values: FilterValue[]) => {
+  const onFilterChange = useCallback((dim: string, values: FilterValue[] | null) => {
     updateChips((prev) => prev.map((c) => (c.dimension === dim ? { ...c, selected: values } : c)))
   }, [updateChips])
   const onToggleSplit = useCallback((dim: string) => {
@@ -302,6 +330,9 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
         for (const ow of ot.widgets) if (!draftWidgetIds.has(ow.id)) await api.deleteDashboardWidget(dashboardId, ow.id)
       }
       const origWidgetById = new Map(orig.tabs.flatMap((t) => t.widgets).map((w) => [w.id, w]))
+      // which tab each widget STARTED on, so a move can be detected and patched
+      const origTabOfWidget = new Map<number, number>()
+      for (const ot of orig.tabs) for (const ow of ot.widgets) origTabOfWidget.set(ow.id, ot.id)
       for (const t of draft.tabs) {
         const realTab = tabRealId.get(t.id)!
         for (const w of t.widgets) {
@@ -315,13 +346,22 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
             if (ow.source_chart_id !== w.source_chart_id) patch.source_chart_id = w.source_chart_id
             if (JSON.stringify(ow.config) !== JSON.stringify(w.config)) patch.config = w.config
             if (!sameLayout(ow.layout, w.layout)) patch.layout = w.layout
+            // Tab move. Without this the save loop already iterated the widget under its NEW
+            // draft tab, but the patch never carried tab_id — so the move looked applied until
+            // the next reload put the widget back where it was.
+            if (origTabOfWidget.get(w.id) !== realTab) patch.tab_id = realTab
             if (Object.keys(patch).length) await api.updateDashboardWidget(dashboardId, w.id, patch)
           }
         }
       }
 
       // filters: replace with the current chip set (dimension + selected defaults)
-      await api.putDashboardFilters(dashboardId, chipsRef.current.map((c) => ({ dimension: c.dimension, default_values: c.selected })))
+      // Saved defaults carry All and partial selections only. None is a transient viewing
+      // state ("show me nothing" is not a useful saved default), so it persists as [] = All.
+      await api.putDashboardFilters(dashboardId, chipsRef.current.map((c) => ({
+        dimension: c.dimension,
+        default_values: c.selected && c.selected.length ? c.selected : [],
+      })))
 
       setEditing(false)
       setDraft(null)
@@ -426,6 +466,25 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
     }))
   }, [activeTabId, mutateDraft])
 
+  // Staged like every other edit-mode action — the widget moves in the DRAFT and the tab change
+  // is persisted on Save (see the tab_id patch in the save loop). Placed at the bottom of the
+  // target tab so it can't land on top of a widget already there.
+  const onWidgetMoveToTab = useCallback((widgetId: number, tabId: number) => {
+    mutateDraft((d) => {
+      const from = d.tabs.find((t) => t.widgets.some((w) => w.id === widgetId))
+      const moved = from?.widgets.find((w) => w.id === widgetId)
+      if (!from || !moved || from.id === tabId) return d
+      return {
+        ...d,
+        tabs: d.tabs.map((t) => {
+          if (t.id === from.id) return { ...t, widgets: t.widgets.filter((w) => w.id !== widgetId) }
+          if (t.id === tabId) return { ...t, widgets: [...t.widgets, { ...moved, layout: { ...moved.layout, x: 0, y: maxY(t) } }] }
+          return t
+        }),
+      }
+    })
+  }, [mutateDraft])
+
   const onWidgetDelete = useCallback((widgetId: number) => {
     const w = draftActiveRef.current?.widgets.find((x) => x.id === widgetId)
     if (!w || !window.confirm(`Delete widget “${w.name}”?`)) return
@@ -445,7 +504,7 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
   // ---------- edit mode: add/remove a global filter chip (staged) ----------
   const onToggleFilterDim = useCallback((dim: string, on: boolean) => {
     updateChips((prev) => on
-      ? (prev.some((c) => c.dimension === dim) ? prev : [...prev, { dimension: dim, options: allDimValues[dim] || [], selected: [], split: false }])
+      ? (prev.some((c) => c.dimension === dim) ? prev : [...prev, { dimension: dim, options: allDimValues[dim] || [], selected: null, split: false }])
       : prev.filter((c) => c.dimension !== dim))
   }, [updateChips, allDimValues])
 
@@ -473,7 +532,7 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
         )}
       </div>
       <div className="shrink-0">
-        <ControlsRow granularity={granularity} dateRange={dateRange} movingAvg={movingAvg} onGranularityChange={setGranularity} onDateRangeChange={setDateRange} onToggleMovingAvg={setMovingAvg} />
+        <ControlsRow granularity={granularity} dateRange={dateRange} movingAvg={movingAvg} endOffset={endOffset ?? 0} onGranularityChange={setGranularity} onDateRangeChange={setDateRange} onToggleMovingAvg={setMovingAvg} onEndOffsetChange={setEndOffset} />
         {editing ? (
           <EditToolbar chips={chips} filterCandidates={filterCandidates} onAddWidget={openQuickAdd} onToggleFilterDim={onToggleFilterDim} onFilterChange={onFilterChange} onToggleSplit={onToggleSplit} onReorderFilter={onReorderFilter} />
         ) : (
@@ -492,6 +551,8 @@ export function DashboardViewContainer({ dashboardId, onGoHome, onOpenDashboard 
               onWidgetSettings={onWidgetSettings}
               onWidgetDuplicate={onWidgetDuplicate}
               onWidgetDelete={onWidgetDelete}
+              onWidgetMoveToTab={onWidgetMoveToTab}
+              otherTabs={(draft?.tabs || []).filter((t) => t.id !== activeTabId).map((t) => ({ id: t.id, name: t.name }))}
               movingAvgWindow={movingAvg ? 7 : null}
             />
           )

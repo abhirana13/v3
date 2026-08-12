@@ -226,8 +226,11 @@ export function EditToolbar({ chips, filterCandidates, onAddWidget, onToggleFilt
 
 /* ---------- editable grid ---------- */
 
-export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChange, onWidgetSettings, onWidgetDuplicate, onWidgetDelete, movingAvgWindow }: {
+export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChange, onWidgetSettings, onWidgetDuplicate, onWidgetDelete, onWidgetMoveToTab, otherTabs, movingAvgWindow }: {
   widgets: DashWidget[]
+  // other tabs of this dashboard, for the “Move to” entries in a widget's … menu
+  otherTabs?: { id: number; name: string }[]
+  onWidgetMoveToTab?: (widgetId: number, tabId: number) => void
   layoutById: Record<number, WidgetLayout>
   dataById: Record<number, WidgetDataState | undefined>
   onLayoutChange: (items: ({ widget_id: number } & WidgetLayout)[]) => void
@@ -262,6 +265,16 @@ export function EditableWidgetGrid({ widgets, layoutById, dataById, onLayoutChan
           )}
           items={[
             { label: 'Duplicate', icon: <Ic.copy />, onClick: () => onWidgetDuplicate(w.id) },
+            // One entry per other tab. Flat rather than a submenu because Menu has no nesting,
+            // and a dashboard has few tabs. Staged like every other edit-mode action: the widget
+            // moves in the draft and the tab change is persisted on Save.
+            ...(onWidgetMoveToTab && (otherTabs || []).length
+              ? ['---' as const, ...(otherTabs || []).map((t) => ({
+                  label: `Move to “${t.name}”`,
+                  icon: <Ic.arrowR />,
+                  onClick: () => onWidgetMoveToTab(w.id, t.id),
+                }))]
+              : []),
             '---',
             { label: 'Delete', icon: <Ic.trash />, danger: true, onClick: () => onWidgetDelete(w.id) },
           ]} />

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ChartRow, UISeries } from '../components/types'
+import { axisDecimals, compactAxis, formatValue } from './format'
 import { HoverCard } from './HoverCard'
 import type { HoverRow } from './HoverCard'
 import type { ChartOptions } from '../components/types'
@@ -22,14 +23,8 @@ const fmtDate = (iso: string) => {
   const d = new Date(iso + 'T00:00:00')
   return `${MON[d.getMonth()]} ${String(d.getDate()).padStart(2, '0')}'${String(d.getFullYear()).slice(2)}`
 }
-const fmtVal = (v: number, s: UISeries) => {
-  const u = s.unit && s.unit !== 'None' ? s.unit : ''
-  let dp = s.decimals ?? 0
-  // a non-zero value must never collapse to "0": widen precision (up to 6 dp) until a
-  // digit shows, so small ratio/formula metrics (e.g. 0.27) stay readable at low decimals
-  if (v !== 0) while (dp < 6 && Number(v.toFixed(dp)) === 0) dp++
-  return (u === '$' ? '$' : '') + v.toLocaleString(undefined, { maximumFractionDigits: dp, minimumFractionDigits: 0 }) + (u === '%' ? '%' : '')
-}
+// unit/decimals formatting lives in charts/format.ts so widgets format identically
+const fmtVal = (v: number, s: UISeries) => formatValue(v, s)
 const numOr = (v: number | string | null | undefined): number | null => (typeof v === 'number' ? v : null)
 
 const toISO = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -126,19 +121,8 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
       const v = row[s.key]
       if (typeof v === 'number') primaryVals.push(v)
     }
-    let axisDec = 1
-    if (primaryVals.length) {
-      let mn = Infinity, mx = -Infinity
-      for (const v of primaryVals) { if (v < mn) mn = v; if (v > mx) mx = v }
-      const ref = (mx - mn) || Math.abs(mx) || 1
-      axisDec = ref >= 5 ? 0 : ref >= 0.5 ? 1 : 2
-    }
-    const compact = (v: number) => {
-      if (v == null || isNaN(v)) return ''
-      if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
-      const s = v.toFixed(axisDec)
-      return axisDec >= 2 ? s : s.replace(/\.0$/, '') // keep 0.90 vs 1.00 distinct; tidy whole steps elsewhere
-    }
+    const axisDec = axisDecimals(primaryVals)
+    const compact = (v: number) => compactAxis(v, axisDec)
 
     const echartSeries = series.map((s) => ({
       name: s.label,

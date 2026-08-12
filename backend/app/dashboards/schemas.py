@@ -36,7 +36,16 @@ class ChartWidgetConfig(BaseModel):
     # None => fall back to the dashboard's default_end_offset_days
     offset_days: int | None = Field(default=None, ge=0)
     offset_mode: Literal["only_on_end_date"] = "only_on_end_date"
-    x_axis: Literal["time"] = "time"
+    # x-axis for this widget:
+    #   None      => INHERIT the source chart's saved x_axis (the default, so a widget on a
+    #                pivoted chart looks like its chart instead of silently flattening to time)
+    #   "time"    => the legacy placeholder from when this was Literal["time"]. It was the only
+    #                permitted value, so it was never an expressed preference — treated as
+    #                inherit, which is what makes existing widgets pick up their chart's axis
+    #                with no data migration.
+    #   <time col> => an explicit time series, overriding a pivoted chart
+    #   <dim name> => pivot onto that dimension
+    x_axis: str | None = None
     # Free-form axis display hints ({"primary": {"min": .., "max": ..}, ...}) — a
     # frontend rendering concern, stored but not interpreted by the backend.
     y_axis: dict = Field(default_factory=dict)
@@ -107,6 +116,11 @@ class WidgetUpdate(BaseModel):
     source_chart_id: int | None = None
     layout: LayoutSpec | None = None
     config: dict | None = None
+    # Move the widget to another TAB of the SAME dashboard. The API rejects a tab belonging to a
+    # different dashboard — moving widgets across dashboards is not a thing this endpoint does,
+    # and silently allowing it would detach the widget from the filters/date window it was
+    # configured against.
+    tab_id: int | None = None
 
 
 class WidgetRead(BaseModel):
@@ -228,6 +242,8 @@ class WidgetPreviewRequest(BaseModel):
     granularity: Literal["day", "week", "month"] = "day"
     filters: Filters = Field(default_factory=dict)
     split: list[str] = Field(default_factory=list)  # global split cuts (chart widgets only)
+    # viewer's recency control; replaces the dashboard's default_end_offset_days for this render
+    offset_days: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _from_lte_to(self):

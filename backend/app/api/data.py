@@ -10,7 +10,7 @@ from app.connections.duckdb import is_lock_error
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.schemas import DataRequest, DataResponse
-from app.serving import dimension_values, serve_data
+from app.serving import dimension_values, serve_data, usable_default_x_axis
 
 router = APIRouter(prefix="/charts", tags=["data"])
 
@@ -23,26 +23,6 @@ _BUSY = "the aggregate cache is being written by a backpopulation right now — 
 
 def _busy() -> HTTPException:
     return HTTPException(status_code=503, detail=_BUSY, headers={"Retry-After": "5"})
-
-
-def _usable_default_x_axis(chart) -> str | None:
-    """The chart's saved x_axis, but only while it still points at an existing dimension.
-
-    Returns None (=> plain time series) when the saved dimension is GONE (e.g. a query edit
-    dropped it), so a stale default can't make the chart unopenable.
-
-    `included` is deliberately NOT required: excluding a dimension only hides it from the
-    chart's filter chips, it stays valid as the x-axis. That's the point for a high-cardinality
-    date dimension like install_date — you never want to pick cohorts from a dropdown (the
-    date picker drives the range), but you do want to plot against them.
-    """
-    if not chart.x_axis or chart.x_axis == chart.time_column:
-        return None
-    from app.derived_dims import DERIVED_NAMES
-
-    if chart.x_axis in DERIVED_NAMES:
-        return chart.x_axis
-    return chart.x_axis if chart.x_axis in {d.name for d in chart.dimensions} else None
 
 
 @router.get("/{chart_id}/dim-values")
@@ -110,7 +90,7 @@ def get_chart_data(
             # saved x_axis whose dimension was later excluded (or dropped by a query edit)
             # must degrade to a plain time series, not 400 the chart into being unopenable.
             # An explicitly-passed unknown dimension still errors — that's a caller bug.
-            x_axis=x_axis if x_axis is not None else _usable_default_x_axis(chart),
+            x_axis=x_axis if x_axis is not None else usable_default_x_axis(chart),
             dimensions=dims_in,
             metrics=metrics_in,
             filters=parsed_filters,

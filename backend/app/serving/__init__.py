@@ -267,6 +267,28 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
         conn.close()
 
 
+def usable_default_x_axis(chart) -> str | None:
+    """The chart's saved x_axis, but only while it still points at an existing dimension.
+
+    Returns None (=> plain time series) when the saved dimension is GONE (e.g. a query edit
+    dropped it), so a stale default can't make the chart unopenable. This guard is load-bearing:
+    chart 17 shipped with x_axis='installs', a METRIC name, and was silently rendering as a time
+    series rather than erroring.
+
+    `included` is deliberately NOT required: excluding a dimension only hides it from the
+    chart's filter chips, it stays valid as the x-axis. That's the point for a high-cardinality
+    date dimension like install_date — you never want to pick cohorts from a dropdown (the
+    date picker drives the range), but you do want to plot against them.
+    """
+    if not chart.x_axis or chart.x_axis == chart.time_column:
+        return None
+    from app.derived_dims import DERIVED_NAMES
+
+    if chart.x_axis in DERIVED_NAMES:
+        return chart.x_axis
+    return chart.x_axis if chart.x_axis in {d.name for d in chart.dimensions} else None
+
+
 def serve_data(chart: Chart, req: DataRequest) -> dict:
     if not chart.time_column:
         raise ValueError("chart has no time_column configured")
@@ -374,13 +396,24 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
         for m_name in requested_base:
             out[m_name] = base_values[m_name]
         for m_name in requested_formulas:
-            metric = metric_by_name[m_name]
-            val = eval_formula(metric.formula, base_values)
-            if val is not None:
-                val = round(val, metric.decimals)
-                if metric.decimals == 0:
-                    val = int(val)
-            out[m_name] = val
+            # FULL PRECISION, deliberately. `decimals` is a DISPLAY setting and rounding here
+            # destroyed the value for everyone downstream — the API, the CSV export, and every
+            # chart. It hit formula metrics only (base metrics were always passed through raw),
+            # and the damage scaled inversely with the ratio's size, because `decimals` is an
+            # absolute number of places rather than significant figures. Measured on chart 13's
+            # `Actions/dau` (decimals=2) over 2026-07-01..20, distinct values surviving:
+            #
+            #   true ratio < 0.05   67 distinct -> 6     9% kept
+            #   true ratio < 0.5   250 distinct -> 50   20% kept
+            #   true ratio >= 1  1,980 distinct -> 1,814  92% kept
+            #
+            # So a rate that lives near 0.02-0.04 (ad revenue per DAU, say) had about three
+            # reachable values and plotted as a flat stepped line. Worse, decimals=0 also did
+            # int(), so a ratio of 3.7 served as 3.
+            #
+            # Formatting belongs at the edge: the chart's fmtVal and the widgets' compactNum
+            # both already apply the metric's unit and decimals at render time.
+            out[m_name] = eval_formula(metric_by_name[m_name].formula, base_values)
         output_rows.append(out)
 
     if req.hide_zero and requested_metrics:

@@ -197,3 +197,76 @@ def test_metric_requires_column_or_formula_not_both(client):
     )
     assert r.status_code == 422
     assert "exactly one" in r.text
+
+
+def test_formula_value_is_not_rounded_to_metric_decimals(client, duckdb_path):
+    """A formula metric is served at FULL PRECISION; `decimals` is display-only.
+
+    Serving used to do `round(val, metric.decimals)` (plus `int()` at decimals=0). Because
+    `decimals` counts absolute places rather than significant figures, the damage scaled
+    inversely with the ratio's size: a rate living near 0.02-0.04 with decimals=2 had about
+    three reachable values and plotted as a flat stepped line. Measured on a real chart, only
+    9% of distinct values below 0.05 survived.
+
+    This pins the small-ratio case specifically, since a ratio >= 1 would round almost
+    losslessly and let the bug back in unnoticed.
+    """
+    chart_id = _make_chart(
+        client,
+        dims=["country"],
+        metrics=[
+            {"name": "revenue", "column_name": "revenue"},
+            {"name": "dau", "column_name": "dau"},
+            # decimals=2 is what would have quantised this to 0.02
+            {"name": "rev_per_dau", "formula": "revenue / dau", "decimals": 2},
+            # decimals=0 additionally did int(), truncating a ratio to a whole number
+            {"name": "rev_per_dau_int", "formula": "revenue / dau", "decimals": 0},
+        ],
+        name="formula-no-rounding",
+    )
+    _seed(
+        duckdb_path,
+        chart_id,
+        [("event_date", "DATE"), ("country", "VARCHAR"), ("revenue", "DOUBLE"), ("dau", "BIGINT")],
+        # 23.4 / 1000 = 0.0234 — inside the band the old rounding flattened
+        [(date(2026, 6, 12), "US", 23.4, 1000)],
+    )
+    row = client.get(f"/charts/{chart_id}/data?group_by=").json()["rows"][0]
+
+    assert row["rev_per_dau"] == pytest.approx(23.4 / 1000)
+    assert row["rev_per_dau"] != 0.02  # what round(0.0234, 2) produced
+    # decimals=0 must not truncate a sub-1 ratio to 0 either
+    assert row["rev_per_dau_int"] == pytest.approx(23.4 / 1000)
+    assert row["rev_per_dau_int"] != 0
+
+
+def test_formula_precision_survives_small_ratios_across_days(client, duckdb_path):
+    """Distinct daily values are preserved, not collapsed onto a rounding grid.
+
+    The old behaviour's signature was a chart with many days and only a handful of distinct
+    y-values, so this asserts on the SIZE of the distinct set rather than any single value.
+    """
+    chart_id = _make_chart(
+        client,
+        dims=["country"],
+        metrics=[
+            {"name": "revenue", "column_name": "revenue"},
+            {"name": "dau", "column_name": "dau"},
+            {"name": "rev_per_dau", "formula": "revenue / dau", "decimals": 2},
+        ],
+        name="formula-precision-days",
+    )
+    # five days that all round to 0.02 at two decimals, but are five distinct ratios
+    revenues = [20.1, 21.3, 22.6, 23.8, 24.4]
+    _seed(
+        duckdb_path,
+        chart_id,
+        [("event_date", "DATE"), ("country", "VARCHAR"), ("revenue", "DOUBLE"), ("dau", "BIGINT")],
+        [(date(2026, 6, 12 + i), "US", rev, 1000) for i, rev in enumerate(revenues)],
+    )
+    rows = client.get(f"/charts/{chart_id}/data?group_by=").json()["rows"]
+
+    served = [r["rev_per_dau"] for r in rows]
+    assert len(rows) == len(revenues)
+    assert len(set(served)) == len(revenues), f"values collapsed onto a rounding grid: {served}"
+    assert sorted(served) == pytest.approx(sorted(r / 1000 for r in revenues))

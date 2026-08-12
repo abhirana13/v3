@@ -515,3 +515,46 @@ def test_replicate_deep_copies(client, chart_id, dash):
     # replicate again -> " (copy) 2"
     r = client.post(f"/dashboards/{did}/replicate")
     assert r.json()["name"] == "My Dashboard (copy) 2"
+
+
+def test_move_widget_to_another_tab(client, chart_id):
+    """A widget can be moved between tabs of the same dashboard (D11).
+
+    WidgetUpdate carried no tab_id at all, so the edit-mode save loop already iterated a moved
+    widget under its new tab while the patch never carried the move — it looked applied until the
+    next reload put the widget back where it started.
+    """
+    dash = make_dashboard(client, name="move-me")
+    tab_a = main_tab_id(client, dash["id"])
+    tab_b = client.post(f"/dashboards/{dash['id']}/tabs", json={"name": "Second"}).json()["id"]
+
+    w = client.post(
+        f"/dashboards/{dash['id']}/tabs/{tab_a}/widgets", json=chart_widget_body(chart_id)
+    ).json()
+    assert w["tab_id"] == tab_a
+
+    r = client.put(f"/dashboards/{dash['id']}/widgets/{w['id']}", json={"tab_id": tab_b})
+    assert r.status_code == 200, r.text
+    assert r.json()["tab_id"] == tab_b
+
+    # it really reads back under the other tab, and is gone from the first
+    tabs = {t["name"]: [x["id"] for x in t["widgets"]] for t in client.get(f"/dashboards/{dash['id']}").json()["tabs"]}
+    assert tabs["Second"] == [w["id"]]
+    assert tabs["Main"] == []
+
+
+def test_cannot_move_widget_into_another_dashboards_tab(client, chart_id):
+    """Cross-dashboard moves are rejected — the widget would be detached from the global
+    filters and date window it was configured against."""
+    d1 = make_dashboard(client, name="d-one")
+    d2 = make_dashboard(client, name="d-two")
+    t1 = main_tab_id(client, d1["id"])
+    foreign_tab = main_tab_id(client, d2["id"])
+
+    w = client.post(
+        f"/dashboards/{d1['id']}/tabs/{t1}/widgets", json=chart_widget_body(chart_id)
+    ).json()
+
+    r = client.put(f"/dashboards/{d1['id']}/widgets/{w['id']}", json={"tab_id": foreign_tab})
+    assert r.status_code == 400, r.text
+    assert "does not belong" in r.text

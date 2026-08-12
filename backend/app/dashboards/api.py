@@ -81,6 +81,12 @@ def _check_config_against_chart(chart: Chart, widget_type: str, config: dict) ->
         for d in cfg.filters:
             if d not in dim_names:
                 _bad("filter dimension", d)
+        # x_axis must name a real dimension, the chart's time column, or the legacy "time"
+        # placeholder. Validating here makes a typo a 400 at save time rather than a widget that
+        # silently falls back to a time series — exactly how chart 17's bogus x_axis='installs'
+        # went unnoticed.
+        if cfg.x_axis is not None and cfg.x_axis not in ("time", chart.time_column) and cfg.x_axis not in dim_names:
+            _bad("x_axis dimension", cfg.x_axis)
     else:
         cfg = NumberWidgetConfig.model_validate(config)
         if cfg.metric not in metric_names:
@@ -214,6 +220,16 @@ def update_widget(
     if "layout" in fields and fields["layout"] is not None:
         fields["layout"] = payload.layout.model_dump()
 
+    # A tab move must stay inside this dashboard. Silently allowing a foreign tab would detach
+    # the widget from the global filters and date window it was configured against.
+    if fields.get("tab_id") is not None:
+        dashboard = _get_dashboard_or_404(db, dashboard_id)
+        if fields["tab_id"] not in {t.id for t in dashboard.tabs}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"tab {fields['tab_id']} does not belong to dashboard {dashboard_id}",
+            )
+
     chart = widget.source_chart
     if fields.get("source_chart_id") is not None:
         chart = crud_charts.get(db, fields["source_chart_id"])
@@ -279,6 +295,12 @@ def get_widget_data(
         description="Global split dimensions (unchecked filter chips) — added to a chart "
         "widget's group_by. Ignored by number widgets.",
     ),
+    offset_days: int | None = Query(
+        default=None, ge=0,
+        description="Viewer's recency control: REPLACES the dashboard's default_end_offset_days "
+        "for this request, so the window can be loosened as well as tightened. A widget with its "
+        "own offset_days still wins.",
+    ),
     db: Session = Depends(get_db),
 ):
     """Resolve a widget to its source chart's CACHED data (never Redshift): widget
@@ -305,11 +327,11 @@ def get_widget_data(
         if widget.type == "chart":
             return serving.chart_widget_data(
                 dashboard, widget, chart, from_date, to_date, granularity, global_filters,
-                extra_group_by=split or [],
+                extra_group_by=split or [], global_offset=offset_days,
             )
         # number widgets: from_date/granularity/split don't apply — the tile is a point
         # value at the (offset-capped) as-of date plus its two lookback deltas
-        return serving.number_widget_data(dashboard, widget, chart, to_date, global_filters)
+        return serving.number_widget_data(dashboard, widget, chart, to_date, global_filters, global_offset=offset_days)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except duckdb.Error as e:
@@ -345,8 +367,9 @@ def preview_widget_data(
             return serving.chart_widget_data(
                 dashboard, widget, chart, payload.from_date, payload.to_date,
                 payload.granularity, payload.filters, extra_group_by=payload.split,
+                global_offset=payload.offset_days,
             )
-        return serving.number_widget_data(dashboard, widget, chart, payload.to_date, payload.filters)
+        return serving.number_widget_data(dashboard, widget, chart, payload.to_date, payload.filters, global_offset=payload.offset_days)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except duckdb.Error as e:

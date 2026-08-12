@@ -240,6 +240,18 @@ export interface ChartWidgetData {
   chart_id: number
   time_column: string
   dimension_columns: string[]
+  // each grouped dimension's value_order, aligned with dimension_columns — drives series
+  // ordering so a widget legend matches its chart page (see buildSeries)
+  dimension_value_order?: string[]
+  // per-metric unit/decimals so a widget tooltip formats values exactly as the chart page does
+  metric_format?: Record<string, { unit?: string | null; decimals?: number | null }>
+  // set when the widget is PIVOTED: the dimension name, and the row key its values live under.
+  // null/absent => rows are keyed on time_column (a normal time series).
+  x_axis?: string | null
+  x_axis_column?: string | null
+  // the filters actually applied after the global/widget cascade — used to build a link that
+  // opens the source chart on the same cuts
+  filters_effective?: Record<string, (string | number | boolean)[]>
   from_date: string | null
   to_date: string | null
   granularity: string
@@ -271,4 +283,5 @@ export interface WidgetWriteBody {
   name?: string
   layout?: WidgetLayout
   config?: Record<string, unknown>
+  tab_id?: number // move the widget to another tab of the SAME dashboard
 }

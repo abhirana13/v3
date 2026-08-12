@@ -106,17 +106,18 @@ export const api = {
     }),
   replicateDashboard: (id: number) => json<DashboardFull>(`/dashboards/${id}/replicate`, { method: 'POST' }),
   dashboardFilterValues: (id: number) => json<{ values: Record<string, FilterValue[]> }>(`/dashboards/${id}/filter-values`),
-  getWidgetData: (dashboardId: number, widgetId: number, q: { from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[] }) => {
+  getWidgetData: (dashboardId: number, widgetId: number, q: { from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[]; offsetDays?: number | null }) => {
     const parts: string[] = []
     if (q.from) parts.push(`from_date=${q.from}`)
     if (q.to) parts.push(`to_date=${q.to}`)
     if (q.granularity) parts.push(`granularity=${q.granularity}`)
     if (q.filters && Object.keys(q.filters).length) parts.push(`filters=${encodeURIComponent(JSON.stringify(q.filters))}`)
     for (const d of q.split || []) parts.push(`split=${encodeURIComponent(d)}`)
+    if (q.offsetDays != null) parts.push(`offset_days=${q.offsetDays}`)
     return json<WidgetData>(`/dashboards/${dashboardId}/widgets/${widgetId}/data${parts.length ? `?${parts.join('&')}` : ''}`)
   },
   // render an unsaved widget (edit-mode working copy) from a posted config
-  previewWidgetData: (dashboardId: number, body: { type: 'chart' | 'number'; source_chart_id: number; config: Record<string, unknown>; from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[] }) =>
+  previewWidgetData: (dashboardId: number, body: { type: 'chart' | 'number'; source_chart_id: number; config: Record<string, unknown>; from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[]; offsetDays?: number | null }) =>
     json<WidgetData>(`/dashboards/${dashboardId}/widget-preview`, jsonBody('POST', {
       type: body.type,
       source_chart_id: body.source_chart_id,
@@ -126,6 +127,7 @@ export const api = {
       granularity: body.granularity ?? 'day',
       filters: body.filters ?? {},
       split: body.split ?? [],
+      offset_days: body.offsetDays ?? null,
     })),
   addDashboardTab: (dashboardId: number, name: string) =>
     json<DashTab>(`/dashboards/${dashboardId}/tabs`, jsonBody('POST', { name })),

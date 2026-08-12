@@ -35,10 +35,13 @@ function useOutside(ref: React.RefObject<HTMLElement>, cb: () => void) {
 
 /* ---------- selects ---------- */
 
-function Select({ value, options, placeholder, onChange, className = '', disabled }: {
+function Select({ value, options, placeholder, onChange, className = '', disabled, labels }: {
   value: string; options: string[]; placeholder: string
   onChange: (v: string) => void; className?: string; disabled?: boolean
+  // display text for values that shouldn't show raw — e.g. '' as "Chart default"
+  labels?: Record<string, string>
 }) {
+  const label = (v: string) => labels?.[v] ?? v
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   useOutside(ref, () => setOpen(false))
@@ -48,7 +51,7 @@ function Select({ value, options, placeholder, onChange, className = '', disable
         className={'flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-[13px] transition-colors ' +
           (disabled ? 'cursor-default border-slate-200 bg-slate-50 text-slate-400'
             : open ? 'border-sky-400 bg-white text-slate-700 ring-1 ring-sky-100' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300')}>
-        <span className={'truncate ' + (!value ? 'text-slate-300' : '')}>{value || placeholder}</span>
+        <span className={'truncate ' + (!value && !labels?.[''] ? 'text-slate-300' : '')}>{label(value) || placeholder}</span>
         <Ic.caret className="shrink-0 text-slate-300" />
       </button>
       {open && !disabled && (
@@ -57,7 +60,7 @@ function Select({ value, options, placeholder, onChange, className = '', disable
           {options.map((o) => (
             <button type="button" key={o} onClick={() => { setOpen(false); onChange(o) }}
               className={'block w-full truncate px-3 py-1.5 text-left text-[13px] hover:bg-slate-50 ' + (o === value ? 'font-semibold text-sky-600' : 'text-slate-600')}>
-              {o}
+              {label(o)}
             </button>
           ))}
         </div>
@@ -188,6 +191,9 @@ interface Draft {
   viz: 'line' | 'bar'
   metrics: MetricSel[]
   groupBy: string[]
+  // '' => inherit the source chart's own x-axis (the default). Otherwise a dimension name, or
+  // the chart's time column to force a plain time series on a chart that pivots.
+  xAxis: string
   offsetDays: string
   yPrimary: Range
   ySecondary: Range
@@ -211,6 +217,9 @@ function initialDraft(widget: WidgetLike): Draft {
     viz: c.viz === 'bar' ? 'bar' : 'line',
     metrics: (c.metrics && c.metrics.length ? c.metrics : [{ name: '', y_axis: 'primary' }]).map((m: any) => ({ name: m.name || '', y_axis: m.y_axis === 'secondary' ? 'secondary' : 'primary' })),
     groupBy: c.group_by || [],
+    // "time" was the only value this field could ever hold, so it was never a real choice —
+    // read it as inherit rather than as an explicit time series.
+    xAxis: !c.x_axis || c.x_axis === 'time' ? '' : String(c.x_axis),
     offsetDays: numOrEmpty(c.offset_days),
     yPrimary: { min: numOrEmpty(c.y_axis?.primary?.min), max: numOrEmpty(c.y_axis?.primary?.max) },
     ySecondary: { min: numOrEmpty(c.y_axis?.secondary?.min), max: numOrEmpty(c.y_axis?.secondary?.max) },
@@ -248,7 +257,7 @@ function buildConfig(type: 'chart' | 'number', d: Draft, existing: any): Record<
       group_by: d.groupBy,
       offset_days: d.offsetDays.trim() === '' ? null : Number(d.offsetDays),
       offset_mode: 'only_on_end_date',
-      x_axis: 'time',
+      x_axis: d.xAxis === '' ? null : d.xAxis,
       y_axis,
       target,
     }
@@ -322,6 +331,7 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
   // options for the currently-selected source chart
   const [metricOptions, setMetricOptions] = useState<string[]>([])
   const [dimOptions, setDimOptions] = useState<string[]>([])
+  const [timeColumn, setTimeColumn] = useState<string>('')
   const [valueOptions, setValueOptions] = useState<Record<string, FilterValue[]>>({})
   const [optsLoading, setOptsLoading] = useState(true)
 
@@ -343,6 +353,7 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
         const values = dv.dimensions as unknown as Record<string, FilterValue[]>
         setMetricOptions(metrics)
         setDimOptions(dims)
+        setTimeColumn(dm.time_column || '')
         setValueOptions(values)
         setOptsLoading(false)
         // prune selections the new chart can't satisfy (avoids a backend 400 on save)
@@ -352,6 +363,8 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
             ...d,
             metrics: d.metrics.map((m) => (m.name && !mset.has(m.name) ? { ...m, name: '' } : m)),
             groupBy: d.groupBy.filter((g) => dset.has(g)),
+            // a pivot naming a dimension this chart lacks falls back to inherit
+            xAxis: d.xAxis && d.xAxis !== (dm.time_column || '') && !dset.has(d.xAxis) ? '' : d.xAxis,
             metric: d.metric && !mset.has(d.metric) ? '' : d.metric,
             filterBy: d.filterBy
               .filter((f) => !f.dimension || dset.has(f.dimension))
@@ -513,6 +526,10 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
                 </button>
                 {isChart && (
                   <div className="pt-2">
+                    <div className="mb-1.5 text-[13px] font-medium text-slate-600">X-axis</div>
+                    <Select className="mb-3 w-56" placeholder="Chart default" value={draft.xAxis} options={['', ...(timeColumn ? [timeColumn] : []), ...dimOptions]}
+                      labels={{ '': 'Chart default', ...(timeColumn ? { [timeColumn]: `Time (${timeColumn})` } : {}) }}
+                      onChange={(v) => set({ xAxis: String(v) })} />
                     <div className="mb-1.5 text-[13px] font-medium text-slate-600">Group By <span className="font-normal text-slate-400">({draft.groupBy.length}/5)</span></div>
                     <MultiSelect values={draft.groupBy} options={dimOptions} placeholder="Dimension" maxSelect={5}
                       onChange={(v) => set({ groupBy: v as string[] })} />
