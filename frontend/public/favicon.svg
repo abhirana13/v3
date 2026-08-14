@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Tab icon: the app's header mark. Sky-500 tile with a white "FG", same colour and corner
+       radius as the <div> logo in ChartView's header (h-7 w-7, bg-sky-500, rounded => 4/28,
+       which is 4.6 at this scale).
+
+       The letters are PATHS, not <text>. An SVG favicon is rendered by the browser chrome,
+       where the font stack is not ours to control — a text-based mark can pick up a different
+       face, shift metrics, or fail to load entirely. Geometry renders identically everywhere.
+
+       Drawn as strokes with round caps at 3.3/32, which is ~1.65px once the icon is scaled to
+       a 16px tab. Thinner than that and the counters close up at tab size. -->
+  <rect width="32" height="32" rx="4.6" fill="#0EA5E9"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="3.3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- F: stem, top arm, shorter middle arm -->
+    <path d="M12.9 8.6 H6.6 V23.4 M6.6 15.3 H12.2"/>
+    <!-- G: open at the upper right (the long way round from -50deg to 0deg), then the crossbar -->
+    <path d="M24.73 12.63 A4.4 4.4 0 1 0 26.3 16 H22.4"/>
+  </g>
+</svg>
