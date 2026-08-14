@@ -31,6 +31,17 @@ const fromISO = (s: string): Date | null => {
 const sameDay = (a: Date | null, b: Date | null) => !!a && !!b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 const stripTime = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
 const addMonths = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth() + n, 1)
+const firstOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1)
+const sameMonth = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
+// Seed the panels from the range itself so both ends are visible on open. The right panel falls
+// back to left+1 when there is no end date, or when both ends sit in one month — two panels
+// showing the SAME month reads as a bug even though nothing is broken.
+const seedLeft = (start: string) => firstOf(fromISO(start) || new Date())
+const seedRight = (start: string, end: string) => {
+  const l = seedLeft(start)
+  const e = fromISO(end)
+  return e && !sameMonth(e, l) ? firstOf(e) : addMonths(l, 1)
+}
 const fmtPretty = (d: Date | null) => (d ? `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}` : '')
 
 /* one month grid */
@@ -90,7 +101,12 @@ const PRESETS = [
    reports the working draft via onDraft on every change. No footer buttons —
    the container (popover or modal) owns Apply/Confirm. */
 export function DateRangeCalendar({ start, end, onDraft }: { start: string; end: string; onDraft: (d: DateDraft) => void }) {
-  const [viewMonth, setViewMonth] = useState<Date>(() => fromISO(start) || new Date())
+  // TWO independent view months. This was a single `viewMonth` with the right panel rendered
+  // as viewMonth+1, so the pair was welded one month apart and the single set of arrows moved
+  // both — there was no way to look at May and August at once, or to change the start month
+  // without dragging the end month along with it.
+  const [leftMonth, setLeftMonth] = useState<Date>(() => seedLeft(start))
+  const [rightMonth, setRightMonth] = useState<Date>(() => seedRight(start, end))
   const [draftStart, setDraftStart] = useState<Date | null>(() => fromISO(start))
   const [draftEnd, setDraftEnd] = useState<Date | null>(() => fromISO(end))
   const [hover, setHover] = useState<Date | null>(null)
@@ -101,7 +117,8 @@ export function DateRangeCalendar({ start, end, onDraft }: { start: string; end:
   useEffect(() => {
     setDraftStart(fromISO(start)); setDraftEnd(fromISO(end))
     setStartText(start); setEndText(end)
-    setViewMonth(fromISO(start) || new Date())
+    setLeftMonth(seedLeft(start))
+    setRightMonth(seedRight(start, end))
   }, [start, end])
 
   const dayCount = useMemo(() => {
@@ -130,13 +147,15 @@ export function DateRangeCalendar({ start, end, onDraft }: { start: string; end:
     const e = stripTime(new Date())
     const s = stripTime(new Date()); s.setDate(s.getDate() - (days - 1))
     setDraftStart(s); setDraftEnd(e); setStartText(toISO(s)); setEndText(toISO(e))
-    setViewMonth(new Date(s.getFullYear(), s.getMonth(), 1))
+    // a preset picks a definite span, so show both of its ends
+    setLeftMonth(firstOf(s))
+    setRightMonth(sameMonth(s, e) ? addMonths(firstOf(s), 1) : firstOf(e))
   }
   const commitText = (which: 'start' | 'end', txt: string) => {
     const d = fromISO(txt)
     if (!d) return
-    if (which === 'start') { setDraftStart(d); setViewMonth(new Date(d.getFullYear(), d.getMonth(), 1)) }
-    else setDraftEnd(d)
+    if (which === 'start') { setDraftStart(d); setLeftMonth(firstOf(d)) }
+    else { setDraftEnd(d); setRightMonth(firstOf(d)) }
   }
 
   const monthLabel = (m: Date) => `${MONTHS[m.getMonth()]} ${m.getFullYear()}`
@@ -160,17 +179,30 @@ export function DateRangeCalendar({ start, end, onDraft }: { start: string; end:
           <span className="text-slate-300">→</span>
           <input value={endText} onChange={(e) => setEndText(e.target.value)} onBlur={() => commitText('end', endText)} placeholder="YYYY-MM-DD" className={field} />
         </div>
-        <div className="mb-2 flex items-center justify-between">
-          <button onClick={() => setViewMonth((m) => addMonths(m, -1))} className="rounded-md p-1 text-slate-500 hover:bg-slate-100"><Ic.prev /></button>
-          <div className="flex flex-1 items-center justify-around px-2">
-            <span className="text-[13px] font-semibold text-slate-700">{monthLabel(viewMonth)}</span>
-            <span className="text-[13px] font-semibold text-slate-700">{monthLabel(addMonths(viewMonth, 1))}</span>
-          </div>
-          <button onClick={() => setViewMonth((m) => addMonths(m, 1))} className="rounded-md p-1 text-slate-500 hover:bg-slate-100"><Ic.next /></button>
-        </div>
+        {/* Each panel steers itself. The panels are VIEWS, not constraints — the selected range
+            is whatever days you click — so neither is clamped against the other and moving one
+            never moves the other. That freedom is the whole point of the change. */}
         <div className="flex gap-5" onMouseLeave={() => setHover(null)}>
-          <MonthGrid month={viewMonth} rangeStart={draftStart} rangeEnd={draftEnd} hover={hover} onPick={pick} onHover={setHover} />
-          <MonthGrid month={addMonths(viewMonth, 1)} rangeStart={draftStart} rangeEnd={draftEnd} hover={hover} onPick={pick} onHover={setHover} />
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <button onClick={() => setLeftMonth((m) => addMonths(m, -1))} title="Previous month"
+                className="rounded-md p-1 text-slate-500 hover:bg-slate-100"><Ic.prev /></button>
+              <span className="text-[13px] font-semibold text-slate-700">{monthLabel(leftMonth)}</span>
+              <button onClick={() => setLeftMonth((m) => addMonths(m, 1))} title="Next month"
+                className="rounded-md p-1 text-slate-500 hover:bg-slate-100"><Ic.next /></button>
+            </div>
+            <MonthGrid month={leftMonth} rangeStart={draftStart} rangeEnd={draftEnd} hover={hover} onPick={pick} onHover={setHover} />
+          </div>
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <button onClick={() => setRightMonth((m) => addMonths(m, -1))} title="Previous month"
+                className="rounded-md p-1 text-slate-500 hover:bg-slate-100"><Ic.prev /></button>
+              <span className="text-[13px] font-semibold text-slate-700">{monthLabel(rightMonth)}</span>
+              <button onClick={() => setRightMonth((m) => addMonths(m, 1))} title="Next month"
+                className="rounded-md p-1 text-slate-500 hover:bg-slate-100"><Ic.next /></button>
+            </div>
+            <MonthGrid month={rightMonth} rangeStart={draftStart} rangeEnd={draftEnd} hover={hover} onPick={pick} onHover={setHover} />
+          </div>
         </div>
       </div>
     </div>
