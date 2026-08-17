@@ -88,7 +88,8 @@ services:
       --reverse-proxy=true
       --skip-provider-button=true
       --cookie-csrf-per-request=true
-      --cookie-csrf-expire=5m
+      --cookie-csrf-expire=15m
+      --cookie-refresh=55m
     environment:
       OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID}
       OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET}

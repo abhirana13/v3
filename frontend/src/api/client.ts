@@ -17,8 +17,65 @@ const RETRY_503 = 2
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/* ---- expired auth session ----------------------------------------------------------------
+
+   The app sits behind oauth2-proxy. When its session expires, every in-flight /api call gets
+   bounced to the sign-in flow at once — and a dashboard opens with ~20 of them in parallel.
+   Each bounced XHR starts its own OAuth round trip and mints its own CSRF cookie; they evict
+   one another, the callback can't find the one it needs, and you land on "sign in again" only
+   to have it happen once more on the next load. That loop is the symptom users report.
+
+   So: exactly ONE re-authentication per page, as a top-level navigation. XHR is the wrong
+   place to run an OAuth flow — the provider is cross-origin, so a followed redirect fails as
+   an opaque CORS error rather than anything actionable.
+
+   The attempt counter is the guard that matters. Reloading on 403 without one turns a genuine
+   authorisation failure (wrong email domain, revoked access) into an infinite reload loop,
+   which is worse than the bug being fixed. One redirect; if we come back still unauthorised,
+   every call rejects with something a human can act on. */
+const REAUTH_KEY = 'analytics.reauth.attempt'
+let reauthState: 'ok' | 'redirecting' | 'failed' = 'ok'
+let authError: Error | null = null
+
+function reauthenticate(): Promise<never> {
+  if (reauthState === 'failed') return Promise.reject(authError as Error)
+  // already navigating away: never resolve, so the other ~19 calls don't each raise a toast
+  if (reauthState === 'redirecting') return new Promise<never>(() => {})
+
+  let tries = 0
+  try { tries = Number(sessionStorage.getItem(REAUTH_KEY) || '0') } catch { /* private mode */ }
+  if (tries >= 1) {
+    reauthState = 'failed'
+    try { sessionStorage.removeItem(REAUTH_KEY) } catch { /* ignore */ }
+    authError = new Error('Not authorised — the session could not be renewed. Reload to sign in again.')
+    return Promise.reject(authError)
+  }
+
+  reauthState = 'redirecting'
+  try { sessionStorage.setItem(REAUTH_KEY, String(tries + 1)) } catch { /* ignore */ }
+  window.location.assign(window.location.href)
+  return new Promise<never>(() => {})
+}
+
+/** 401/403 are the direct signals. `opaqueredirect` is the 302 to the provider: redirect
+ *  'manual' below keeps fetch from following it cross-origin, where it would surface as an
+ *  unhelpful network error instead of "your session expired". */
+const isAuthFailure = (res: Response) =>
+  res.status === 401 || res.status === 403 || res.type === 'opaqueredirect'
+
+/** Every call goes through here, so the auth handling can't be forgotten at a call site. */
+async function apiFetch(url: string, opts?: RequestInit): Promise<Response> {
+  const res = await fetch(BASE + url, { redirect: 'manual', ...opts })
+  if (isAuthFailure(res)) await reauthenticate()
+  // a good response means the session is alive again — let a later expiry have a fresh attempt
+  if (res.ok && reauthState === 'ok') {
+    try { sessionStorage.removeItem(REAUTH_KEY) } catch { /* ignore */ }
+  }
+  return res
+}
+
 async function json<T>(url: string, opts?: RequestInit, attempt = 0): Promise<T> {
-  const res = await fetch(BASE + url, opts)
+  const res = await apiFetch(url, opts)
   if (res.status === 503 && attempt < RETRY_503 && !(opts?.method && opts.method !== 'GET')) {
     const after = Number(res.headers.get('Retry-After'))
     await sleep((Number.isFinite(after) && after > 0 ? after : 5) * 1000)
@@ -29,6 +86,12 @@ async function json<T>(url: string, opts?: RequestInit, attempt = 0): Promise<T>
     throw new Error(`${res.status} ${res.statusText}: ${body}`)
   }
   return res.json() as Promise<T>
+}
+
+/** DELETEs return no body, but still need the auth handling — hence the shared helper. */
+async function del(url: string): Promise<void> {
+  const res = await apiFetch(url, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
 }
 
 function qs(params: Record<string, string | undefined | null>): string {
@@ -79,9 +142,7 @@ export const api = {
   freshness: (id: number) => json<Freshness>(`/charts/${id}/freshness`),
   chartsOverview: () => json<ChartOverview[]>('/charts/overview'),
   deleteChart: (id: number) =>
-    fetch(`${BASE}/charts/${id}`, { method: 'DELETE' }).then(async (res) => {
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
-    }),
+    del(`/charts/${id}`),
   getDimsMetrics: (id: number) => json<DimsMetrics>(`/charts/${id}/dims-metrics`),
   getDimValues: (id: number, from?: string | null, to?: string | null) =>
     json<DimValues>(`/charts/${id}/dim-values${qs({ from_date: from, to_date: to })}`),
@@ -101,9 +162,7 @@ export const api = {
   updateDashboard: (id: number, body: Partial<{ name: string; enabled: boolean; default_date_range_days: number; default_end_offset_days: number }>) =>
     json<DashboardMeta>(`/dashboards/${id}`, jsonBody('PUT', body)),
   deleteDashboard: (id: number) =>
-    fetch(`${BASE}/dashboards/${id}`, { method: 'DELETE' }).then(async (res) => {
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
-    }),
+    del(`/dashboards/${id}`),
   replicateDashboard: (id: number) => json<DashboardFull>(`/dashboards/${id}/replicate`, { method: 'POST' }),
   dashboardFilterValues: (id: number) => json<{ values: Record<string, FilterValue[]> }>(`/dashboards/${id}/filter-values`),
   getWidgetData: (dashboardId: number, widgetId: number, q: { from?: string | null; to?: string | null; granularity?: string; filters?: GlobalFilters; split?: string[]; offsetDays?: number | null }) => {
@@ -134,17 +193,13 @@ export const api = {
   updateDashboardTab: (dashboardId: number, tabId: number, body: Partial<{ name: string; display_order: number }>) =>
     json<DashTab>(`/dashboards/${dashboardId}/tabs/${tabId}`, jsonBody('PUT', body)),
   deleteDashboardTab: (dashboardId: number, tabId: number) =>
-    fetch(`${BASE}/dashboards/${dashboardId}/tabs/${tabId}`, { method: 'DELETE' }).then(async (res) => {
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
-    }),
+    del(`/dashboards/${dashboardId}/tabs/${tabId}`),
   addDashboardWidget: (dashboardId: number, tabId: number, body: WidgetWriteBody) =>
     json<DashWidget>(`/dashboards/${dashboardId}/tabs/${tabId}/widgets`, jsonBody('POST', body)),
   updateDashboardWidget: (dashboardId: number, widgetId: number, body: WidgetWriteBody) =>
     json<DashWidget>(`/dashboards/${dashboardId}/widgets/${widgetId}`, jsonBody('PUT', body)),
   deleteDashboardWidget: (dashboardId: number, widgetId: number) =>
-    fetch(`${BASE}/dashboards/${dashboardId}/widgets/${widgetId}`, { method: 'DELETE' }).then(async (res) => {
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
-    }),
+    del(`/dashboards/${dashboardId}/widgets/${widgetId}`),
   saveTabLayout: (dashboardId: number, tabId: number, items: ({ widget_id: number } & WidgetLayout)[]) =>
     json<DashTab>(`/dashboards/${dashboardId}/tabs/${tabId}/layout`, jsonBody('PUT', items)),
   putDashboardFilters: (dashboardId: number, filters: { dimension: string; default_values?: FilterValue[] }[]) =>
