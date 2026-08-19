@@ -164,6 +164,9 @@ class DimsMetricsOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     time_column: str | None
     date_format: str | None
+    # The chart's configured window. The view seeds its date range from these two rather than
+    # remembering whatever the viewer last picked, so a chart always opens on its own definition.
+    default_date_range_days: int = 90
     default_end_offset_days: int = 2
     # chart's default x-axis (None => the time column; a dim name => pivot)
     x_axis: str | None = None

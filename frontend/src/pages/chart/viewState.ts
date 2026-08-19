@@ -28,10 +28,10 @@ export interface SavedChartView {
   granularity?: string
   chartType?: string
   hideZero?: boolean
-  endOffset?: number
-  from?: string
-  to?: string
-  xAxis?: string | null
+  // NOT stored: the date window, the recency offset and the x-axis. Those are the chart's
+  // DEFINITION, re-read from its config on every open — a remembered window meant a chart
+  // opened on whatever range someone last dragged it to. Entries written before this change
+  // may still carry those keys on disk; they are simply ignored.
   dims?: Record<string, SavedDimState>
   metrics?: string[] // visible metric names
 }

@@ -78,14 +78,14 @@ function seededView(saved: SavedChartView | null, seed?: ChartViewSeed | null): 
   // every OTHER dimension is un-split: the seed describes the full set of cuts, so a leftover
   // split from the viewer's last visit would add a series the widget never showed
   if (seed.split) for (const d of Object.keys(dims)) if (!named.has(d)) dims[d] = { ...dims[d], split: false }
+  // The seed's from/to/xAxis are deliberately NOT folded in here: those are no longer part of
+  // the remembered shape, and hydration reads them straight off `seed` so that an explicit URL
+  // request still wins over the chart's config without reviving date persistence.
   return {
     ...base,
     dims,
     metrics: seed.metrics ?? base.metrics,
-    from: seed.from ?? base.from,
-    to: seed.to ?? base.to,
     granularity: seed.granularity ?? base.granularity,
-    xAxis: seed.xAxis === undefined ? base.xAxis : (seed.xAxis === '' ? null : seed.xAxis),
   }
 }
 
@@ -183,20 +183,33 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
         if (saved?.granularity) setGranularity(saved.granularity)
         if (saved?.chartType) setChartType(saved.chartType)
         if (saved?.hideZero != null) setHideZero(saved.hideZero)
-        // open at the chart's saved default recency (falls back to 2)
-        setEndOffset(saved?.endOffset ?? (dm.default_end_offset_days ?? 2))
-        // saved x-axis: only a real dimension pivots (the time column means time series)
+        // ---- DATE AND X-AXIS COME FROM THE CHART'S CONFIG, NOT FROM SAVED STATE ----
+        // Neither is remembered any more. A remembered window meant a chart opened on whatever
+        // range you last dragged it to, which is not what the chart is defined to show; a
+        // remembered pivot could make it look nothing like its saved definition.
+        const offset = dm.default_end_offset_days ?? 2
+        setEndOffset(offset)
+        // The URL seed wins where it speaks — that is a dashboard widget's "open the source
+        // chart on these cuts" link, an explicit request rather than a remembered preference.
         const chartDefaultX = dm.x_axis && dm.x_axis !== dm.time_column ? dm.x_axis : null
-        const restoredX = saved?.xAxis
-        // a remembered pivot dimension that's since been dropped falls back to the default
         setXAxisDim(
-          restoredX !== undefined && (restoredX === null || dm.dimensions.some((d) => d.name === restoredX))
-            ? restoredX
-            : chartDefaultX,
+          seed?.xAxis !== undefined ? (seed.xAxis === '' ? null : seed.xAxis) : chartDefaultX,
         )
-        // window end = today; the recency offset caps it (recencyEnd) so the offset, not
-        // a stale end, controls how recent the data is
-        setDateRange({ start: saved?.from ?? (dv.date_min || ''), end: saved?.to ?? todayMinus(0) })
+
+        // The window spans the chart's configured default_date_range_days, ending at the
+        // offset-capped today. end is today because recencyEnd caps it to today-offset, so the
+        // effective span is exactly range_days.
+        //
+        // This replaces `start = dv.date_min`, which was not a window at all — it was the
+        // EARLIEST DAY IN THE CACHE, so a chart with no saved state opened on its entire
+        // history regardless of what it was configured for.
+        //
+        // Clamped to date_min so a chart with less history than its configured range does not
+        // open on a mostly-empty axis. It can never show MORE than the configured window.
+        const rangeDays = dm.default_date_range_days ?? 90
+        const cfgStart = todayMinus(offset + rangeDays - 1)
+        const clamped = dv.date_min && dv.date_min > cfgStart ? dv.date_min : cfgStart
+        setDateRange({ start: seed?.from ?? clamped, end: seed?.to ?? todayMinus(0) })
         hydrated.current = true
       } catch (e: any) {
         if (alive) setError(String(e.message || e))
@@ -210,16 +223,17 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
      defaults. Nothing here touches the backend. */
   useEffect(() => {
     if (!hydrated.current) return
+    // Deliberately NOT saved: from/to, endOffset and xAxis. Those are the chart's definition,
+    // read from its config on every open (see the hydration block). Dimensions, granularity,
+    // chart type, hide-zero and metric visibility are the viewer's own working state and stay.
     saveChartView(chartId, {
-      granularity, chartType, hideZero, endOffset,
-      from: dateRange.start, to: dateRange.end,
-      xAxis: xAxisDim,
+      granularity, chartType, hideZero,
       dims: Object.fromEntries(
         dimensions.map((d) => [d.key, { split: d.split, sel: encodeSelection(d.selected, d.values) }]),
       ),
       metrics: metrics.filter((m) => m.visible).map((m) => m.name),
     })
-  }, [chartId, granularity, chartType, hideZero, endOffset, dateRange.start, dateRange.end, xAxisDim, dimensions, metrics])
+  }, [chartId, granularity, chartType, hideZero, dimensions, metrics])
 
   /* ---- freshness (data recency + last backpop) for the header ---- */
   useEffect(() => {

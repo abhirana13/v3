@@ -93,6 +93,8 @@ export interface MetricCfg {
 export interface DimsMetrics {
   time_column: string | null
   date_format: string | null
+  // the chart's configured window — the view seeds its date range from these, it is not remembered
+  default_date_range_days?: number
   default_end_offset_days?: number
   // chart's default x-axis: null => the time column (time series); a dim name => pivot
   x_axis?: string | null
