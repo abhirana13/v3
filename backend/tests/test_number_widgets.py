@@ -356,3 +356,45 @@ def test_tile_anchor_must_exist_on_the_chart(client, cohort_chart, dash, fake_to
     )
     assert r.status_code == 400, r.text
     assert "x_axis" in r.text
+
+
+def test_anchor_lag_shifts_the_cohort_additively(client, cohort_chart, dash, fake_today):
+    """anchor_lag_days moves the as-of date back, ON TOP of the resolved window.
+
+    offset_days cannot do this and that is the whole reason this field exists: it is a recency
+    CAP, min(to_date, today - offset), so it only pulls back from TODAY. With an explicit
+    to_date already in the past, raising offset_days changes nothing — proven below.
+    """
+    w_lag0 = add_tile(client, dash, cohort_chart, {"metric": "returned"}, name="lag0")
+    w_lag1 = add_tile(
+        client, dash, cohort_chart, {"metric": "returned", "anchor_lag_days": 1}, name="lag1"
+    )
+    a = tile_data(client, dash, w_lag0, to_date="2026-06-11")
+    b = tile_data(client, dash, w_lag1, to_date="2026-06-11")
+
+    assert a["as_of_date"] == "2026-06-11"
+    assert b["as_of_date"] == "2026-06-10", "lag must subtract from the resolved as-of date"
+    assert a["value"] == pytest.approx(180)   # cohort 06-11
+    assert b["value"] == pytest.approx(70)    # cohort 06-10: 40 + 30
+
+
+def test_offset_days_cannot_express_a_horizon(client, cohort_chart, dash, fake_today):
+    """Pins the flaw that made the first attempt at this useless, so nobody 'simplifies' the
+    lag away by folding it back into offset_days."""
+    w0 = add_tile(client, dash, cohort_chart, {"metric": "returned", "offset_days": 0}, name="o0")
+    w3 = add_tile(client, dash, cohort_chart, {"metric": "returned", "offset_days": 3}, name="o3")
+    a = tile_data(client, dash, w0, to_date="2026-06-11")
+    b = tile_data(client, dash, w3, to_date="2026-06-11")
+    # identical: the cap is already looser than the requested date, so it does not bind
+    assert a["as_of_date"] == b["as_of_date"] == "2026-06-11"
+
+
+def test_lag_composes_with_offset(client, cohort_chart, dash, fake_today):
+    """Both apply: the cap resolves the window, then the lag shifts the cohort."""
+    w = add_tile(
+        client, dash, cohort_chart,
+        {"metric": "returned", "offset_days": 0, "anchor_lag_days": 1}, name="both",
+    )
+    body = tile_data(client, dash, w, to_date="2026-06-11")
+    assert body["as_of_date"] == "2026-06-10"
+    assert body["value"] == pytest.approx(70)

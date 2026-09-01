@@ -73,6 +73,17 @@ class NumberWidgetConfig(BaseModel):
     # date instead: numerator and denominator aggregated over an event_date that mixes every
     # install cohort present that day, which is not a rate for anyone.
     x_axis: str | None = None
+    # Shift the as-of date BACK by this many days, applied on top of the resolved window.
+    #
+    # This is NOT offset_days. offset_days is a recency CAP — min(to_date, today - offset) — so
+    # it only pulls the date back from TODAY, never from the date the dashboard picked. With a
+    # picked end already a few days back, raising it moved the anchor by those few days and no
+    # further, which made it useless for the thing it looked like it should do.
+    #
+    # A cohort horizon is a LAG and has to be additive: the cohort that installed on as_of has
+    # no D3 yet, so a D3 rate reads the cohort from three days earlier. Set this to the metric's
+    # horizon — 3 for D3, 7 for D7 — and it composes with offset_days instead of competing.
+    anchor_lag_days: int | None = Field(default=None, ge=0)
     decimals: int = Field(default=0, ge=0, le=10)
     unit: str | None = Field(default=None, max_length=32)
     compares: list[Literal["previous_day", "last_week"]] = Field(

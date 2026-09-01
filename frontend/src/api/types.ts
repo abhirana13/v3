@@ -181,7 +181,9 @@ export interface ChartWidgetConfig {
   group_by: string[]
   offset_days: number | null
   offset_mode: string
-  x_axis: string
+  // null => inherit the source chart's saved x_axis; the time column => force a time series;
+  // a dimension name => pivot on it
+  x_axis: string | null
   y_axis: Record<string, { min?: number; max?: number }>
   target: number | null
 }
@@ -192,6 +194,12 @@ export interface NumberWidgetConfig {
   decimals: number
   unit: string | null
   compares: ('previous_day' | 'last_week')[]
+  // what "as of <date>" is matched against — null inherits the chart's axis, so on a cohort
+  // chart the tile reads the cohort that installed on that date
+  x_axis: string | null
+  // shift the as-of date back by N days (a metric's horizon: 3 for D3, 7 for D7). Distinct from
+  // offset_days, which is a recency cap and cannot express a lag.
+  anchor_lag_days: number | null
   offset_days: number | null
   target: number | null
 }

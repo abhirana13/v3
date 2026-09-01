@@ -194,6 +194,7 @@ interface Draft {
   // '' => inherit the source chart's own x-axis (the default). Otherwise a dimension name, or
   // the chart's time column to force a plain time series on a chart that pivots.
   xAxis: string
+  anchorLagDays: string // number tiles: shift the as-of date back by N days (cohort horizon)
   offsetDays: string
   yPrimary: Range
   ySecondary: Range
@@ -220,6 +221,7 @@ function initialDraft(widget: WidgetLike): Draft {
     // "time" was the only value this field could ever hold, so it was never a real choice —
     // read it as inherit rather than as an explicit time series.
     xAxis: !c.x_axis || c.x_axis === 'time' ? '' : String(c.x_axis),
+    anchorLagDays: numOrEmpty(c.anchor_lag_days),
     offsetDays: numOrEmpty(c.offset_days),
     yPrimary: { min: numOrEmpty(c.y_axis?.primary?.min), max: numOrEmpty(c.y_axis?.primary?.max) },
     ySecondary: { min: numOrEmpty(c.y_axis?.secondary?.min), max: numOrEmpty(c.y_axis?.secondary?.max) },
@@ -275,6 +277,7 @@ function buildConfig(type: 'chart' | 'number', d: Draft, existing: any): Record<
     // cohort chart means the tile reads the cohort that installed on that date instead of
     // everything that happened to be active on it.
     x_axis: d.xAxis === '' ? null : d.xAxis,
+    anchor_lag_days: d.anchorLagDays.trim() === '' ? null : Number(d.anchorLagDays),
     offset_days: d.offsetDays.trim() === '' ? null : Number(d.offsetDays),
     target,
   }
@@ -550,6 +553,17 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
                       choosing install_date makes “as of D” mean the cohort that installed on D —
                       rather than everything that was merely active that day.
                     </div>
+                    <div className="mt-3">
+                      <div className="mb-1.5 text-[13px] font-medium text-slate-600">As-of lag <span className="font-normal text-slate-400">(days)</span></div>
+                      <input type="number" min={0} value={draft.anchorLagDays} placeholder="0"
+                        onChange={(e) => set({ anchorLagDays: e.target.value })}
+                        className="w-56 rounded-md border border-slate-200 px-3 py-2 text-[13px] text-slate-700 outline-none placeholder:text-slate-300 focus:border-sky-400 focus:ring-1 focus:ring-sky-100" />
+                      <div className="mt-1.5 text-[12px] leading-snug text-slate-400">
+                        Set this to the metric's horizon — 3 for a D3 rate, 7 for D7. The cohort
+                        that installed on the as-of date has no D3 yet, so without a lag the tile
+                        correctly reads 0.
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -572,9 +586,9 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
                   </div>
                   {!isChart && (
                     <div className="mt-1.5 text-[12px] leading-snug text-slate-400">
-                      Shifts which date the tile reads. With a cohort anchor, set this to the
-                      metric's horizon — 3 for a D3 rate, 7 for D7 — or the cohort you land on is
-                      too young to have one yet.
+                      A recency cap: never read data more recent than today minus this. For a
+                      cohort horizon use “As-of lag” below — this one cannot express it, because a
+                      cap only pulls back from today, not from the range you picked.
                     </div>
                   )}
                 </div>

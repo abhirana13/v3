@@ -259,6 +259,10 @@ def number_widget_data(
     null when either side is missing, pct also null when v_prev is 0."""
     cfg = NumberWidgetConfig.model_validate(widget.config)
     _, as_of = resolve_window(dashboard, cfg.offset_days, None, to_date, global_offset)
+    # The cohort lag is SUBTRACTED from the resolved date, not folded into resolve_window's
+    # min(). Folding it in is what made offset_days useless as a horizon: a cap can only pull
+    # back from today, so with a picked end already in the past it did nothing.
+    as_of = as_of - timedelta(days=cfg.anchor_lag_days or 0)
     merged, empty_selection = merge_filters(chart, global_filters, cfg.filters)
 
     out = {
