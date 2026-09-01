@@ -275,8 +275,7 @@ function buildConfig(type: 'chart' | 'number', d: Draft, existing: any): Record<
     // cohort chart means the tile reads the cohort that installed on that date instead of
     // everything that happened to be active on it.
     x_axis: d.xAxis === '' ? null : d.xAxis,
-    // offset isn't exposed for number tiles in this modal — preserve what's set
-    offset_days: existing?.offset_days ?? null,
+    offset_days: d.offsetDays.trim() === '' ? null : Number(d.offsetDays),
     target,
   }
 }
@@ -560,20 +559,27 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
             <div ref={(el) => (secRefs.current.other = el)} className="pb-4">
               <SectionHeading>Other Settings</SectionHeading>
               <div className="flex flex-col gap-5">
+                {/* Offset applies to BOTH widget types. It used to sit inside the chart-only
+                    branch, so a number tile's offset_days could only be set through the API —
+                    and it is exactly what a cohort tile needs: the cohort that installed on
+                    as_of has no D3 yet, so a D3 tile has to lag its anchor by 3 days. */}
+                <div>
+                  <FieldLabel>Offset <span className="font-normal text-slate-400">(days; blank = dashboard default)</span></FieldLabel>
+                  <div className="flex items-center gap-2.5">
+                    <input type="number" min={0} value={draft.offsetDays} placeholder="dashboard default" onChange={(e) => set({ offsetDays: e.target.value })}
+                      className="flex-1 rounded-md border border-slate-200 px-3 py-2 text-[13px] text-slate-700 outline-none placeholder:text-slate-300 focus:border-sky-400 focus:ring-1 focus:ring-sky-100" />
+                    <Select className="w-52" value="Only on end date" options={['Only on end date']} placeholder="Mode" onChange={() => {}} disabled />
+                  </div>
+                  {!isChart && (
+                    <div className="mt-1.5 text-[12px] leading-snug text-slate-400">
+                      Shifts which date the tile reads. With a cohort anchor, set this to the
+                      metric's horizon — 3 for a D3 rate, 7 for D7 — or the cohort you land on is
+                      too young to have one yet.
+                    </div>
+                  )}
+                </div>
                 {isChart ? (
                   <>
-                    <div>
-                      <FieldLabel>Offset <span className="font-normal text-slate-400">(days; blank = dashboard default)</span></FieldLabel>
-                      <div className="flex items-center gap-2.5">
-                        <input type="number" min={0} value={draft.offsetDays} placeholder="dashboard default" onChange={(e) => set({ offsetDays: e.target.value })}
-                          className="flex-1 rounded-md border border-slate-200 px-3 py-2 text-[13px] text-slate-700 outline-none placeholder:text-slate-300 focus:border-sky-400 focus:ring-1 focus:ring-sky-100" />
-                        <Select className="w-52" value="Only on end date" options={['Only on end date']} placeholder="Mode" onChange={() => {}} disabled />
-                      </div>
-                    </div>
-                    <div>
-                      <FieldLabel>X-Axis</FieldLabel>
-                      <Select value="time" options={['time']} placeholder="X-Axis" onChange={() => {}} disabled />
-                    </div>
                     <div>
                       <FieldLabel>Y-Axis Range</FieldLabel>
                       <div className="rounded-md border border-slate-200">
