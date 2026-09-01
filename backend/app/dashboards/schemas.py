@@ -62,6 +62,17 @@ class ChartWidgetConfig(BaseModel):
 class NumberWidgetConfig(BaseModel):
     metric: str = Field(min_length=1, max_length=128)
     filters: Filters = Field(default_factory=dict)
+    # What `as_of` is matched AGAINST. Same vocabulary as ChartWidgetConfig.x_axis:
+    #   None       => INHERIT the source chart's saved x_axis
+    #   <time col> => force the time column (the old, only behaviour)
+    #   <dim name> => anchor on that dimension, so "as of D" means the row where that
+    #                 dimension = D — e.g. install_date, i.e. the cohort that installed on D
+    #
+    # Without this a tile could only ever say "metric where time_column = as_of". On a cohort
+    # chart viewed against install_date that produced a number computed against the ACTIVITY
+    # date instead: numerator and denominator aggregated over an event_date that mixes every
+    # install cohort present that day, which is not a rate for anyone.
+    x_axis: str | None = None
     decimals: int = Field(default=0, ge=0, le=10)
     unit: str | None = Field(default=None, max_length=32)
     compares: list[Literal["previous_day", "last_week"]] = Field(

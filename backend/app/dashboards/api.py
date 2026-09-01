@@ -94,6 +94,10 @@ def _check_config_against_chart(chart: Chart, widget_type: str, config: dict) ->
         for d in cfg.filters:
             if d not in dim_names:
                 _bad("filter dimension", d)
+        # same guard as chart widgets: a typo'd anchor is a 400 here rather than a tile that
+        # silently falls back to the time column and reports against the wrong date
+        if cfg.x_axis is not None and cfg.x_axis not in ("time", chart.time_column) and cfg.x_axis not in dim_names:
+            _bad("x_axis dimension", cfg.x_axis)
 
 
 # ---------- dashboards ----------

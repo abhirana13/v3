@@ -271,6 +271,10 @@ function buildConfig(type: 'chart' | 'number', d: Draft, existing: any): Record<
     decimals: d.decimals.trim() === '' ? 0 : Number(d.decimals),
     unit: d.unit === '(none)' || d.unit === '' ? null : d.unit,
     compares,
+    // What "as of <date>" is matched against. '' => inherit the chart's own axis, which for a
+    // cohort chart means the tile reads the cohort that installed on that date instead of
+    // everything that happened to be active on it.
+    x_axis: d.xAxis === '' ? null : d.xAxis,
     // offset isn't exposed for number tiles in this modal — preserve what's set
     offset_days: existing?.offset_days ?? null,
     target,
@@ -533,6 +537,20 @@ export function EditWidgetModal({ widget, charts, onApply, onCancel }: {
                     <div className="mb-1.5 text-[13px] font-medium text-slate-600">Group By <span className="font-normal text-slate-400">({draft.groupBy.length}/5)</span></div>
                     <MultiSelect values={draft.groupBy} options={dimOptions} placeholder="Dimension" maxSelect={5}
                       onChange={(v) => set({ groupBy: v as string[] })} />
+                  </div>
+                )}
+                {!isChart && (
+                  <div className="pt-2">
+                    <div className="mb-1.5 text-[13px] font-medium text-slate-600">“As of” is matched against</div>
+                    <Select className="w-56" placeholder="Chart default" value={draft.xAxis}
+                      options={['', ...(timeColumn ? [timeColumn] : []), ...dimOptions]}
+                      labels={{ '': 'Chart default', ...(timeColumn ? { [timeColumn]: `Time (${timeColumn})` } : {}) }}
+                      onChange={(v) => set({ xAxis: String(v) })} />
+                    <div className="mt-1.5 text-[12px] leading-snug text-slate-400">
+                      Pick a date dimension to read a cohort instead of a day. On a retention chart,
+                      choosing install_date makes “as of D” mean the cohort that installed on D —
+                      rather than everything that was merely active that day.
+                    </div>
                   </div>
                 )}
               </div>

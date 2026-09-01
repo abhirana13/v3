@@ -243,3 +243,116 @@ def test_tile_offset_caps_as_of(client, seeded_chart, dash, fake_today):
     body = tile_data(client, dash, w)
     assert body["as_of_date"] == "2026-06-16"
     assert body["value"] is None
+
+
+# ---------- anchoring: "as of D" against a cohort date, not the activity date ----------
+
+@pytest.fixture
+def cohort_chart(client, duckdb_path):
+    """A retention-shaped chart: time column is the ACTIVITY date, and install_date is a
+    separate dimension the chart pivots on. Deliberately built so the two anchors disagree.
+
+    Seed — two install cohorts, each active on several later days:
+
+      install_date  event_date   installs  returned
+      06-10         06-11               100        40
+      06-10         06-12               100        30
+      06-11         06-12               200       120
+      06-11         06-13               200        60
+
+    Anchored on event_date, 06-12 mixes BOTH cohorts: returned 30+120=150 over installs
+    100+200=300 => 50%, a number belonging to neither cohort.
+    Anchored on install_date, 06-11 is one cohort: 120+60=180 over 200 => 90%.
+    """
+    r = client.post(
+        "/charts", json={"name": "cohort-src", "query": "SELECT 1", "time_column": "event_date"}
+    )
+    chart_id = r.json()["id"]
+    client.put(
+        f"/charts/{chart_id}/dims-metrics",
+        json={
+            "time_column": "event_date",
+            "dimensions": [{"name": "install_date", "column_name": "install_date"}],
+            "metrics": [
+                # installs is the COHORT size, so it must not be summed across activity days
+                {"name": "installs", "column_name": "installs",
+                 "independent_dimensions": []},
+                {"name": "returned", "column_name": "returned"},
+                {"name": "retention", "formula": "returned * 100 / installs", "decimals": 2},
+            ],
+        },
+    )
+    # the chart itself pivots on the cohort date
+    client.put(f"/charts/{chart_id}", json={"x_axis": "install_date"})
+
+    conn = duckdb.connect(duckdb_path)
+    t = table_name(chart_id)
+    conn.execute(
+        f'CREATE TABLE "{t}" (event_date DATE, install_date DATE, installs BIGINT, returned BIGINT)'
+    )
+    conn.executemany(
+        f'INSERT INTO "{t}" VALUES (?, ?, ?, ?)',
+        [
+            (date(2026, 6, 11), date(2026, 6, 10), 100, 40),
+            (date(2026, 6, 12), date(2026, 6, 10), 100, 30),
+            (date(2026, 6, 12), date(2026, 6, 11), 200, 120),
+            (date(2026, 6, 13), date(2026, 6, 11), 200, 60),
+        ],
+    )
+    conn.close()
+    return chart_id
+
+
+def test_tile_inherits_the_charts_cohort_anchor(client, cohort_chart, dash, fake_today):
+    """A tile on a chart that pivots on install_date reads the COHORT, not the activity day.
+
+    Previously number_widget_data keyed rows on chart.time_column with no x_axis, so a tile on
+    a retention chart reported against the event date: numerator and denominator aggregated
+    over a day that mixes every cohort active on it, which is a rate for nobody.
+    """
+    w = add_tile(client, dash, cohort_chart, {"metric": "returned", "decimals": 0})
+    body = tile_data(client, dash, w, to_date="2026-06-11")
+
+    assert body["anchored_on"] == "install_date"
+    # cohort 06-11 returned 120 + 60 across its activity days
+    assert body["value"] == pytest.approx(180)
+
+
+def test_tile_can_force_the_time_column(client, cohort_chart, dash, fake_today):
+    """Naming the time column overrides an inherited cohort anchor."""
+    w = add_tile(
+        client, dash, cohort_chart,
+        {"metric": "returned", "decimals": 0, "x_axis": "event_date"},
+    )
+    body = tile_data(client, dash, w, to_date="2026-06-12")
+
+    assert body["anchored_on"] == "event_date"
+    # activity day 06-12 mixes both cohorts: 30 + 120
+    assert body["value"] == pytest.approx(150)
+
+
+def test_cohort_anchor_and_time_anchor_disagree(client, cohort_chart, dash, fake_today):
+    """The whole point, stated as one assertion: the two anchors give different answers, so
+    which one a tile uses is not cosmetic."""
+    w_cohort = add_tile(client, dash, cohort_chart, {"metric": "returned"}, name="c")
+    w_time = add_tile(
+        client, dash, cohort_chart, {"metric": "returned", "x_axis": "event_date"}, name="t"
+    )
+    on_11_cohort = tile_data(client, dash, w_cohort, to_date="2026-06-11")["value"]
+    on_11_time = tile_data(client, dash, w_time, to_date="2026-06-11")["value"]
+    assert on_11_cohort == pytest.approx(180)   # cohort installed 06-11
+    assert on_11_time == pytest.approx(40)      # activity on 06-11 (cohort 06-10's D1)
+    assert on_11_cohort != on_11_time
+
+
+def test_tile_anchor_must_exist_on_the_chart(client, cohort_chart, dash, fake_today):
+    """A typo'd anchor is a 400 at save time, not a silent fall back to the time column."""
+    tab_id = client.get(f"/dashboards/{dash['id']}").json()["tabs"][0]["id"]
+    r = client.post(
+        f"/dashboards/{dash['id']}/tabs/{tab_id}/widgets",
+        json={"type": "number", "source_chart_id": cohort_chart, "name": "bad",
+              "layout": {"x": 0, "y": 0, "w": 3, "h": 2},
+              "config": {"metric": "returned", "x_axis": "nope"}},
+    )
+    assert r.status_code == 400, r.text
+    assert "x_axis" in r.text

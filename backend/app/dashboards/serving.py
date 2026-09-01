@@ -276,22 +276,70 @@ def number_widget_data(
     if empty_selection:
         return out
 
-    req = DataRequest(
-        from_date=as_of - timedelta(days=max(_COMPARE_LOOKBACK.values())),
-        to_date=as_of,
-        granularity="day",
-        dimensions=[],
-        metrics=[cfg.metric],
-        filters=merged,
+    # ---- WHAT `as_of` IS MATCHED AGAINST ----------------------------------------------------
+    # Inherited from the chart's saved x_axis unless the widget overrides it (same rule as chart
+    # widgets). None => the time column, i.e. the original behaviour.
+    #
+    # This is the fix for a cohort tile reading against the wrong date. A chart viewed against
+    # install_date still produced a tile computed against event_date, because the tile keyed
+    # rows on chart.time_column: numerator and denominator were aggregated over an event_date
+    # containing every install cohort active that day, so the ratio belonged to nobody.
+    anchor = (
+        usable_default_x_axis(chart)
+        if cfg.x_axis is None or cfg.x_axis == "time"
+        else (None if cfg.x_axis == chart.time_column else cfg.x_axis)
     )
-    result = serve_data(chart, req)
-    by_date = {row[chart.time_column]: row.get(cfg.metric) for row in result["rows"]}
 
-    value = by_date.get(as_of)
+    lookback = max(_COMPARE_LOOKBACK.values())
+    wanted = [as_of - timedelta(days=d) for d in range(0, lookback + 1)]
+
+    if anchor is None:
+        req = DataRequest(
+            from_date=as_of - timedelta(days=lookback),
+            to_date=as_of,
+            granularity="day",
+            dimensions=[],
+            metrics=[cfg.metric],
+            filters=merged,
+        )
+        key_col = chart.time_column
+    else:
+        # Anchored on a dimension. Two things change together:
+        #
+        #  * the ANCHOR values are pinned to the dates we need (as_of and its two comparison
+        #    dates) as an explicit filter — serve_data's from/to always bounds the TIME column,
+        #    so it cannot narrow a pivot dimension;
+        #  * the TIME window is dropped entirely. This is the part that is easy to get wrong: a
+        #    cohort's activity lands on event_dates AFTER its install date, so ANY window ending
+        #    at as_of clips all of it and the tile reads None. The anchor filter is the
+        #    constraint here; time is not. It stays cheap because that filter pins the scan to
+        #    at most eight cohort dates.
+        req = DataRequest(
+            from_date=None,
+            to_date=None,
+            granularity="day",
+            x_axis=anchor,
+            dimensions=[],
+            metrics=[cfg.metric],
+            filters={**merged, anchor: [d.isoformat() for d in wanted]},
+        )
+        key_col = _dim_columns(chart, [anchor])[0]
+
+    result = serve_data(chart, req)
+
+    # The key may come back as a date or as a string depending on how the column was cached, so
+    # normalise both sides to an ISO prefix rather than trusting the type.
+    def _iso(v) -> str:
+        return str(v)[:10] if v is not None else ""
+
+    by_date = {_iso(row.get(key_col)): row.get(cfg.metric) for row in result["rows"]}
+    out["anchored_on"] = anchor or chart.time_column
+
+    value = by_date.get(_iso(as_of))
     out["value"] = value
 
     def _delta(ref_date: date) -> dict | None:
-        prev = by_date.get(ref_date)
+        prev = by_date.get(_iso(ref_date))
         if value is None or prev is None:
             return None
         return {
