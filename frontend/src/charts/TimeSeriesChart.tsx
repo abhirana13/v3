@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ChartRow, UISeries } from '../components/types'
 import { axisDecimals, compactAxis, formatValue } from './format'
+import { naturalCompare } from '../pages/chart/transforms'
 import { HoverCard } from './HoverCard'
 import type { HoverRow } from './HoverCard'
 import type { ChartOptions } from '../components/types'
@@ -163,8 +164,17 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
             padding: [8, 12], textStyle: { color: '#0f172a', fontSize: 12 }, extraCssText: 'box-shadow:0 6px 20px rgba(15,23,42,.12);border-radius:8px;',
             formatter: (ps: any) => {
               if (!ps || !ps.length) return ''
-              let out = `<div style="font-weight:600;margin-bottom:4px;color:#475569">${ps[0].axisValue}</div>`
-              ps.forEach((pt: any) => {
+              const axisValue = ps[0].axisValue
+              let out = `<div style="font-weight:600;margin-bottom:4px;color:#475569">${axisValue}</div>`
+              // biggest first, missing last — same rule as the time-mode hover card, so the two
+              // tooltips never disagree about ordering (ECharts hands these over in series order)
+              const sorted = [...ps].sort((a: any, b: any) => {
+                const av = typeof a.data === 'number' ? a.data : null
+                const bv = typeof b.data === 'number' ? b.data : null
+                if (av == null || bv == null) return (av == null ? 1 : 0) - (bv == null ? 1 : 0)
+                return bv - av || naturalCompare(String(a.seriesName), String(b.seriesName))
+              })
+              sorted.forEach((pt: any) => {
                 const cfg = series.find((s) => s.label === pt.seriesName) || ({} as UISeries)
                 const val = pt.data == null ? '—' : fmtVal(Number(pt.data), cfg)
                 out += `<div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:99px;background:${pt.color}"></span><span style="color:#475569">${pt.seriesName}</span><span style="margin-left:auto;font-weight:600;color:#0f172a">${val}</span></div>`
@@ -243,13 +253,34 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
     const longDate = shiftISO(curDate, dcfg.long.months || 0, dcfg.long.days || 0)
     const pct = (now: number | null, then: number | null) =>
       now == null || then == null || then === 0 ? null : Math.round(((now - then) / then) * 100)
-    return series.map((s) => {
-      const dm = byKey.get(s.key)
-      const cur = dm?.get(curDate) ?? null
-      const short = dm?.get(shortDate) ?? null
-      const long = dm?.get(longDate) ?? null
-      return { name: s.label, color: s.color, value: cur == null ? '—' : fmtVal(cur, s), short: pct(cur, short), long: pct(cur, long) }
-    })
+    return series
+      .map((s) => {
+        const dm = byKey.get(s.key)
+        const cur = dm?.get(curDate) ?? null
+        const short = dm?.get(shortDate) ?? null
+        const long = dm?.get(longDate) ?? null
+        return {
+          name: s.label, color: s.color,
+          value: cur == null ? '—' : fmtVal(cur, s),
+          short: pct(cur, short), long: pct(cur, long),
+          // kept only to sort by: `value` above is already a formatted string, so the card
+          // itself cannot order numerically
+          _v: cur,
+        }
+      })
+      // BIGGEST FIRST. The card used to follow legend order, which for a country split meant
+      // alphabetical — so answering "who is on top right now" meant reading every row. A
+      // crosshair tooltip is a snapshot of one instant and the lines cross anyway, so there is
+      // no stable order worth preserving here; the legend keeps that job.
+      //
+      // Missing values sort LAST rather than as zero: a series with no data at this point is
+      // not the smallest, it is absent, and burying it below the real numbers says so.
+      // naturalCompare breaks ties so equal values do not shuffle between hovers.
+      .sort((a, b) => {
+        if (a._v == null || b._v == null) return (a._v == null ? 1 : 0) - (b._v == null ? 1 : 0)
+        return b._v - a._v || naturalCompare(a.name, b.name)
+      })
+      .map(({ _v, ...row }) => row)
   }, [hover, data, series, byKey, gran])
 
   // total across all series at the hovered point + its deltas. Only meaningful

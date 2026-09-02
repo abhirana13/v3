@@ -392,7 +392,14 @@ export function ChartWidgetCard({ title, data, config, loading, error, onExpand,
         formatter: (ps: any) => {
           if (!ps || !ps.length) return ''
           let out = `<div style="font-weight:600;margin-bottom:4px;color:#475569">${fmtAxisDate(String(ps[0].axisValue))}</div>`
-          for (const p of ps) {
+          // biggest first, missing last — matching the chart view's tooltips
+          const sorted = [...ps].sort((a: any, b: any) => {
+            const av = typeof a.data === 'number' ? a.data : null
+            const bv = typeof b.data === 'number' ? b.data : null
+            if (av == null || bv == null) return (av == null ? 1 : 0) - (bv == null ? 1 : 0)
+            return bv - av || naturalCompare(String(a.seriesName), String(b.seriesName))
+          })
+          for (const p of sorted) {
             const val = typeof p.data === 'number' ? formatValue(p.data, fmtFor(p.seriesName)) : '—'
             out += `<div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:99px;background:${p.color}"></span><span style="color:#475569">${p.seriesName}</span><span style="margin-left:auto;font-weight:600;color:#0f172a">${val}</span></div>`
           }
