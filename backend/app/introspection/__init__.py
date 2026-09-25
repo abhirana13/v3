@@ -91,6 +91,39 @@ def introspect_query(
     return classify_columns(description)
 
 
+def query_columns(
+    query: str,
+    static_vars: dict | None = None,
+    sample_date: date | None = None,
+    database: str | None = None,
+) -> list[str]:
+    """Just the output column NAMES of a query, in order.
+
+    Same LIMIT 0 round trip as introspect_query, but without classifying anything into
+    dimensions and metrics. The caller here only wants to know whether a query still
+    produces the same shape as the cache it is about to be written into, and going through
+    classification would make that answer depend on type-guessing rules that have nothing
+    to do with the question.
+    """
+    sample_date = sample_date or date.today()
+    batch = DateBatch(start_date=sample_date, end_date=sample_date)
+    try:
+        substituted = substitute(query, static_vars or {}, batch)
+    except UnresolvedVariableError as e:
+        raise IntrospectionError(
+            f"unresolved template variable {{{e.args[0]}}}; set it in chart.variables"
+        ) from e
+    try:
+        with redshift_conn.connect(database=database) as conn:
+            cursor = conn.cursor()
+            cursor.execute(_prepare_for_limit_zero(substituted))
+            description = cursor.description or []
+    except Exception as e:
+        raise IntrospectionError(f"{type(e).__name__}: {e}") from e
+    # some drivers hand column names back as bytes
+    return [c[0].decode() if isinstance(c[0], bytes) else c[0] for c in description]
+
+
 def classify_columns(description: list) -> IntrospectionResult:
     time_column: str | None = None
     dimensions: list[DimensionIn] = []

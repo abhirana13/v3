@@ -3,11 +3,18 @@ from sqlalchemy.orm import Session
 
 from datetime import datetime, timezone
 
-from app.backpop import enqueue_run, request_cancel
+from app.backpop import column_diff, duckdb_writer, enqueue_run, query_hash, request_cancel
 from app.connections.postgres import get_db
 from app.crud import charts as crud_charts
 from app.models import BackpopRun
-from app.schemas import BackpopRequest, BackpopRunRead, FreshnessRead
+from app.introspection import IntrospectionError, query_columns
+from app.schemas import (
+    BackpopRequest,
+    BackpopRunRead,
+    CacheCompatOut,
+    CacheCompatRequest,
+    FreshnessRead,
+)
 from app.serving import latest_data_date
 
 router = APIRouter(prefix="/charts", tags=["backpop"])
@@ -31,6 +38,7 @@ def trigger_backpop(
         to_date=payload.to_date,
         batch_size=payload.batch_size,
         force=payload.force,
+        keep_cache=payload.keep_cache,
     )
 
 
@@ -81,6 +89,11 @@ def get_freshness(chart_id: int, db: Session = Depends(get_db)):
         ),
         running=running,
         last_run=last_run,
+        # cache_query_hash is null for a chart that has never been backpopped — not a change,
+        # just nothing to compare against yet.
+        query_changed=(
+            chart.cache_query_hash is not None and chart.cache_query_hash != query_hash(chart)
+        ),
     )
 
 
@@ -93,4 +106,62 @@ def list_backpop_runs(chart_id: int, db: Session = Depends(get_db)):
         .filter(BackpopRun.chart_id == chart_id)
         .order_by(BackpopRun.id.desc())
         .all()
+    )
+
+
+@router.post("/{chart_id}/cache-compat", response_model=CacheCompatOut)
+def cache_compat(
+    chart_id: int,
+    payload: CacheCompatRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """Can this query be written into the chart's existing cache?
+
+    Exists so the person editing a query is not the one who has to work out whether their
+    edit was structural. Adding a game to an IN list cannot change the output columns, and
+    the tool can establish that for itself with a LIMIT 0 round trip — the same one the
+    "Generate Dims And Metrics" button already makes — instead of asking the editor to
+    vouch for it and warning them when they do.
+
+    Advisory, not authoritative: it runs against the draft query, and the real guard still
+    runs inside the backpop against the columns actually returned. The two share
+    column_diff(), so they cannot give different answers about the same query.
+    """
+    chart = crud_charts.get(db, chart_id)
+    if chart is None:
+        raise HTTPException(status_code=404, detail="chart not found")
+
+    payload = payload or CacheCompatRequest()
+    keep_supported = bool(chart.time_column)
+    keep_reason = None if keep_supported else (
+        "this chart has no time column, so days cannot be replaced individually — "
+        "re-reading a range would append duplicate rows"
+    )
+
+    if not duckdb_writer.cache_columns(chart.id):
+        # No cache means nothing is at stake — every path rebuilds from scratch anyway.
+        return CacheCompatOut(has_cache=False, columns_match=True,
+                              keep_supported=keep_supported, keep_blocked_reason=keep_reason)
+
+    query = payload.query if payload.query is not None else chart.query
+    variables = payload.variables if payload.variables is not None else dict(chart.variables or {})
+    try:
+        cols = query_columns(query, static_vars=variables, database=chart.database)
+    except IntrospectionError as e:
+        # Never block the dialog on this. An unreachable Redshift or a half-typed query is a
+        # reason to fall back to asking the editor, not a reason to refuse to show them a
+        # backpop dialog at all.
+        return CacheCompatOut(
+            has_cache=True, columns_match=False, checked=False, message=str(e),
+            keep_supported=keep_supported, keep_blocked_reason=keep_reason,
+        )
+
+    added, removed = column_diff(chart, cols)
+    return CacheCompatOut(
+        has_cache=True,
+        columns_match=not added and not removed,
+        added=added,
+        removed=removed,
+        keep_supported=keep_supported,
+        keep_blocked_reason=keep_reason,
     )

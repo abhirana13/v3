@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.backpop import duckdb_writer
 from app.config import settings
 from app.connections import redshift as redshift_conn
+from app.derived_dims import DERIVED_NAMES
 from app.models import BackpopRun, Chart
 from app.templating import DateBatch, expand_date_range, substitute
 
@@ -127,6 +128,7 @@ def _create_run(
     batch_size: int | None = None,
     status: str = "running",
     force: bool = False,
+    keep_cache: bool = False,
 ) -> BackpopRun:
     """Create + commit a BackpopRun (so it's visible to the history at once) with the
     resolved range/batch size. ``status='queued'`` enqueues it for the worker to execute;
@@ -145,6 +147,7 @@ def _create_run(
     run = BackpopRun(
         chart_id=chart_id, from_date=from_date, to_date=to_date,
         batch_size=batch_size, status=status, force=force,
+        keep_cache=keep_cache,
     )
     db.add(run)
     db.commit()
@@ -159,12 +162,14 @@ def enqueue_run(
     to_date: date | None = None,
     batch_size: int | None = None,
     force: bool = False,
+    keep_cache: bool = False,
 ) -> BackpopRun:
     """Queue a manual backpop for the worker to execute, returning the 'queued' run at
     once (so the HTTP request doesn't block on the work — fixes the long-backfill timeout).
     The caller polls the run; ``drain_backpop_queue`` (worker) executes it."""
     return _create_run(
-        db, chart_id, from_date, to_date, batch_size, status="queued", force=force
+        db, chart_id, from_date, to_date, batch_size, status="queued", force=force,
+        keep_cache=keep_cache,
     )
 
 
@@ -204,21 +209,104 @@ def drain_backpop_queue(db: Session) -> int:
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
             continue
-        _run_batches(db, run, chart, force=run.force)
+        _run_batches(db, run, chart, force=run.force, keep_cache=bool(run.keep_cache))
         processed += 1
     return processed
 
 
+class ColumnMismatch(Exception):
+    """The current query's result columns don't line up with the existing cache table."""
+
+
+def column_diff(chart: Chart, cols: list[str]) -> tuple[list[str], list[str]]:
+    """(added, removed) between a query's output columns and the chart's cache table.
+
+    ([], []) means the cache can accept rows from this query. Derived columns are excluded:
+    the backend writes those itself via ALTER TABLE (materialize_derived), so the query never
+    supplies them and their presence is expected rather than a difference.
+
+    One definition, used by both the pre-flight check the backpop dialog runs and the guard
+    inside the run itself — so the dialog cannot promise something the run then refuses.
+    """
+    cached = duckdb_writer.cache_columns(chart.id)
+    if not cached:
+        return [], []  # nothing cached yet, so nothing to be incompatible with
+    expected = cached - DERIVED_NAMES
+    got = set(cols)
+    return sorted(got - expected), sorted(expected - got)
+
+
+def incompatible_columns(chart: Chart, cols: list[str]) -> str | None:
+    """Why the cached table cannot accept rows from the current query, or None if it can.
+
+    Only consulted for a keep-the-cache run, where the table is NOT being rebuilt and so has
+    to keep accepting inserts shaped the way it already is.
+
+    Derived columns are excluded from the comparison because the backend writes them itself
+    (materialize_derived adds e.g. country_tier with ALTER TABLE); the query never supplies
+    them, so their presence in the table is expected rather than a mismatch.
+
+    Both directions matter, and the second is the quiet one:
+      * a column the query GAINED isn't in the table, and the INSERT names columns explicitly,
+        so it fails outright — loudly, but only after some days were already deleted.
+      * a column the query LOST still exists in the table, so the INSERT succeeds and every
+        newly written row carries NULL where the old rows hold a value. Nothing errors; the
+        chart just quietly grows a hole.
+    """
+    added, removed = column_diff(chart, cols)
+    if not added and not removed:
+        return None
+    parts = []
+    if added:
+        parts.append(f"new column(s) {', '.join(added)}")
+    if removed:
+        parts.append(f"missing column(s) {', '.join(removed)}")
+    return (
+        f"the query's result columns no longer match the cache ({'; '.join(parts)}). "
+        "Keeping the existing data is only safe when the edit changes which ROWS come back, "
+        "not which columns. Re-run without 'keep existing data' to rebuild the cache."
+    )
+
+
 def _run_batches(
-    db: Session, run: BackpopRun, chart: Chart, force: bool = False
+    db: Session, run: BackpopRun, chart: Chart, force: bool = False,
+    keep_cache: bool = False,
 ) -> BackpopRun:
     """Execute the batches for an already-created run, checking for cancellation
     between batches. Each batch is committed as it lands, so a cancel/failure keeps
     the rows already written. ``force`` re-pulls and overwrites every day in range."""
     # If the query/variables changed since the cache was built, the cache is stale —
     # drop it so this run rebuilds from scratch (also picking up column changes).
+    #
+    # ...UNLESS this run asked to keep it. That is the "I added a game to the IN list"
+    # case: the edit changes which ROWS come back, not what the existing ones mean, so
+    # dropping everything and rebuilding only the requested window is pure loss — it is
+    # exactly how a chart ends up with three days of history instead of nine months.
+    # The caller is asserting the edit is additive; incompatible_columns() below is the
+    # part of that assertion the backend can actually check.
+    # Keeping the cache means re-reading a range, and re-reading a range means DELETING those
+    # days before re-inserting them. That delete is `WHERE CAST(time_column AS DATE) BETWEEN
+    # ...`, so without a time column there is nothing to delete by and every re-read would
+    # append a second copy of the same rows — silent double counting, which is the one failure
+    # this project treats as worse than not running at all. Refuse instead.
+    #
+    # (`force` has the same hole and is left alone here: changing an existing flag's behaviour
+    # is a separate decision. It is reported, not fixed, by this change.)
+    if keep_cache and not chart.time_column:
+        run.status = "failed"
+        run.error_message = (
+            "keep existing data needs a time column: without one the cache cannot be cleared "
+            "per day, so re-reading a range would append duplicate rows. Set the chart's time "
+            "column, or rebuild without keeping the cache."
+        )
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(run)
+        return run
+
     current_hash = query_hash(chart)
-    if chart.cache_query_hash is not None and chart.cache_query_hash != current_hash:
+    query_changed = chart.cache_query_hash is not None and chart.cache_query_hash != current_hash
+    if query_changed and not keep_cache:
         duckdb_writer.drop_table(chart.id)
 
     from_eff, to_eff = run.from_date, run.to_date
@@ -247,14 +335,25 @@ def _run_batches(
 
     today = datetime.now(timezone.utc).date()
     refresh_cutoff = _refresh_cutoff(today)
+    # Keeping the cache has to RE-PULL the requested window, not fill-missing it. The days the
+    # new game needs adding to are precisely the days already cached, and fill-missing skips
+    # exactly those — so without this the run would report success having changed nothing,
+    # which is a worse answer than the data loss it replaced.
+    #
+    # Deliberately not folded into `force`: that flag also licenses clearing a day whose
+    # re-fetch comes back empty, and a mode whose entire purpose is "do not lose my data"
+    # must not wipe history on a transient empty read. See wipes_on_empty below, which still
+    # keys off `force` alone.
+    repull = force or keep_cache
     batches = _compute_batches(
-        chart, from_eff, to_eff, run.batch_size, refresh_cutoff, force=force
+        chart, from_eff, to_eff, run.batch_size, refresh_cutoff, force=repull
     )
     static_vars = dict(chart.variables or {})
 
     total_rows = 0
     batches_done = 0
     cancelled = False
+    checked_columns = False
     try:
         for batch in batches:
             # cancel flag is set by the API (another process); re-read committed state —
@@ -264,7 +363,16 @@ def _run_batches(
                 break
             sql = substitute(chart.query, static_vars, batch)
             rows, cols = _execute_redshift(sql, database=chart.database)
-            batch_cache = _batch_cache_strategy(chart, batch, refresh_cutoff, force=force)
+            # Checked once, on the first batch that reports columns, and BEFORE any write —
+            # write_batch deletes the batch's day before inserting, so discovering the
+            # mismatch one batch later would mean discovering it having already destroyed a
+            # day of the history this run promised to preserve.
+            if keep_cache and cols and not checked_columns:
+                problem = incompatible_columns(chart, cols)
+                if problem:
+                    raise ColumnMismatch(problem)
+                checked_columns = True
+            batch_cache = _batch_cache_strategy(chart, batch, refresh_cutoff, force=repull)
             # don't let an empty re-fetch wipe an already-cached refresh-window day
             # (transient blip / data not in yet) — keep what's there until real rows
             # come back. A forced run is an explicit "match Redshift for this range",
@@ -332,10 +440,11 @@ def run_backpop(
     to_date: date | None = None,
     batch_size: int | None = None,
     force: bool = False,
+    keep_cache: bool = False,
 ) -> BackpopRun:
     """Create the run and execute its batches. Synchronous: the run is committed as
     'running' up front (so polling sees it) and progresses per batch; a concurrent
     cancel request can stop it between batches. ``force`` re-pulls and overwrites every
     day in range (for restatements), ignoring the fill-missing skip."""
-    run = _create_run(db, chart_id, from_date, to_date, batch_size)
-    return _run_batches(db, run, db.get(Chart, chart_id), force=force)
+    run = _create_run(db, chart_id, from_date, to_date, batch_size, keep_cache=keep_cache)
+    return _run_batches(db, run, db.get(Chart, chart_id), force=force, keep_cache=keep_cache)

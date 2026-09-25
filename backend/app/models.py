@@ -151,6 +151,10 @@ class BackpopRun(Base):
     error_message = Column(Text, nullable=True)
     # force re-pull is persisted so a queued run carries it to the worker that executes it
     force = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Keep the existing cache instead of dropping it when the query hash has changed, and
+    # re-pull only this run's range. Persisted for the same reason as `force`: the API queues
+    # the run and a separate worker process executes it, so anything not on the row is lost.
+    keep_cache = Column(Boolean, nullable=False, default=False, server_default="false")
     # cancel signal lives in the DB (not an in-process set) so it reaches a run executing
     # in another process — prod runs multiple uvicorn workers + a separate worker process
     cancel_requested = Column(Boolean, nullable=False, default=False, server_default="false")

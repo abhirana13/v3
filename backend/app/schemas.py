@@ -181,6 +181,11 @@ class BackpopRequest(BaseModel):
     # force: re-pull and OVERWRITE every day in range (ignore fill-missing skip),
     # for one-off restatements of older days. Empty re-fetch clears the day.
     force: bool = False
+    # keep_cache: don't drop the cache when the query has changed — re-pull only this range
+    # and leave every day outside it alone. For an edit that adds ROWS (a new game in an IN
+    # list), where a rebuild would throw away history the new query would still return.
+    # Implies a re-pull of the range; unlike force, it never clears a day that reads empty.
+    keep_cache: bool = False
 
     @model_validator(mode="after")
     def _from_lte_to(self):
@@ -237,6 +242,8 @@ class BackpopRunRead(BaseModel):
     row_count: int
     batches_completed: int
     error_message: str | None
+    force: bool = False
+    keep_cache: bool = False
     started_at: datetime
     completed_at: datetime | None
 
@@ -245,6 +252,10 @@ class FreshnessRead(BaseModel):
     latest_data_date: date | None
     running: bool
     last_run: BackpopRunRead | None
+    # True when the chart's query/variables have been edited since the cache was last built,
+    # i.e. the next ordinary backpop will DROP the cache and rebuild only its own range.
+    # Surfaced so the backpop dialog can say so before the click rather than after.
+    query_changed: bool = False
 
 
 class ChartOverview(BaseModel):
@@ -259,3 +270,32 @@ class ChartOverview(BaseModel):
     last_backpop_at: datetime | None
     last_backpop_rows: int | None
     running: bool
+
+
+class CacheCompatRequest(BaseModel):
+    """Ask whether a query can be written into the chart's existing cache.
+
+    `query`/`variables` carry the DRAFT — the edit still sitting in the config page,
+    unsaved. That is the moment the answer is wanted: before choosing whether to keep the
+    cache, not after the run has already acted on the choice.
+    """
+
+    query: str | None = None
+    variables: dict[str, Any] | None = None
+
+
+class CacheCompatOut(BaseModel):
+    has_cache: bool
+    # True when the cache can accept rows from this query (or there is no cache to protect)
+    columns_match: bool
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    # False => the check itself could not run (Redshift unreachable, SQL rejected). The
+    # caller must not read columns_match as a verdict; `message` says what went wrong.
+    checked: bool = True
+    message: str | None = None
+    # False => this chart cannot keep its cache at all, whatever the columns say. Today the
+    # only cause is a missing time column: the per-day delete has nothing to key on, so a
+    # re-read would append duplicates rather than replace.
+    keep_supported: bool = True
+    keep_blocked_reason: str | None = None

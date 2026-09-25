@@ -130,6 +130,9 @@ export interface BackpopRun {
   row_count: number
   batches_completed: number
   error_message: string | null
+  force: boolean
+  /** ran with "keep existing data": no drop on a query change, re-pull this range only */
+  keep_cache: boolean
   started_at: string
   completed_at: string | null
 }
@@ -138,6 +141,9 @@ export interface Freshness {
   latest_data_date: string | null
   running: boolean
   last_run: BackpopRun | null
+  /** the saved query differs from the one the cache was built with, so an ordinary
+   *  backpop would drop the cache and rebuild only its own range */
+  query_changed: boolean
 }
 
 export interface ChartOverview {
@@ -294,4 +300,18 @@ export interface WidgetWriteBody {
   layout?: WidgetLayout
   config?: Record<string, unknown>
   tab_id?: number // move the widget to another tab of the SAME dashboard
+}
+
+/** Answer to "can this query be written into the chart's existing cache?".
+ *  `checked: false` means the check could not run — treat columns_match as unknown. */
+export interface CacheCompat {
+  has_cache: boolean
+  columns_match: boolean
+  added: string[]
+  removed: string[]
+  checked: boolean
+  message: string | null
+  /** false => this chart can never keep its cache (no time column to delete days by) */
+  keep_supported: boolean
+  keep_blocked_reason: string | null
 }

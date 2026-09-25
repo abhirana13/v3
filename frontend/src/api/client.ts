@@ -1,7 +1,7 @@
 // Thin api-client. The ONLY place that knows the backend's URL shape, so the
 // UI stays decoupled (CLAUDE.md). Calls go to /api/* which Vite proxies to the
 // backend (prefix stripped).
-import type { BackpopRun, ChartFull, ChartOverview, ChartSummary, ChartWriteBody, DashboardFull, DashboardMeta, DashboardOverviewRow, DashTab, DashWidget, DataQuery, DataResponse, Datasources, DimsMetrics, DimValues, FilterValue, Freshness, GlobalFilters, IntrospectionResult, MetricCfg, WidgetData, WidgetLayout, WidgetWriteBody } from './types'
+import type { BackpopRun, CacheCompat, ChartFull, ChartOverview, ChartSummary, ChartWriteBody, DashboardFull, DashboardMeta, DashboardOverviewRow, DashTab, DashWidget, DataQuery, DataResponse, Datasources, DimsMetrics, DimValues, FilterValue, Freshness, GlobalFilters, IntrospectionResult, MetricCfg, WidgetData, WidgetLayout, WidgetWriteBody } from './types'
 
 const BASE = '/api'
 
@@ -59,7 +59,8 @@ function reauthenticate(): Promise<never> {
 
 /** 401/403 are the direct signals. `opaqueredirect` is the 302 to the provider: redirect
  *  'manual' below keeps fetch from following it cross-origin, where it would surface as an
- *  unhelpful network error instead of "your session expired". */
+ *  unhelpful network error instead of "your session expired".
+ */
 const isAuthFailure = (res: Response) =>
   res.status === 401 || res.status === 403 || res.type === 'opaqueredirect'
 
@@ -91,7 +92,10 @@ async function json<T>(url: string, opts?: RequestInit, attempt = 0): Promise<T>
 /** DELETEs return no body, but still need the auth handling — hence the shared helper. */
 async function del(url: string): Promise<void> {
   const res = await apiFetch(url, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`${res.status} ${res.statusText}: ${body}`)
+  }
 }
 
 function qs(params: Record<string, string | undefined | null>): string {
@@ -131,12 +135,15 @@ export const api = {
   updateChart: (id: number, body: ChartWriteBody) => json<ChartFull>(`/charts/${id}`, jsonBody('PUT', body)),
   introspect: (id: number) => json<IntrospectionResult>(`/charts/${id}/introspect`, { method: 'POST' }),
   // body omitted => server runs the chart's default window (default_backpop_days, ending today)
-  backpopulate: (id: number, body?: { from_date: string; to_date: string; batch_size?: number; force?: boolean }) =>
+  backpopulate: (id: number, body?: { from_date: string; to_date: string; batch_size?: number; force?: boolean; keep_cache?: boolean }) =>
     json<BackpopRun>(
       `/charts/${id}/backpopulate`,
       body ? jsonBody('POST', body) : { method: 'POST' },
     ),
   backpopRuns: (id: number) => json<BackpopRun[]>(`/charts/${id}/backpop-runs`),
+  // pass the DRAFT query so the answer reflects the edit on screen, not the saved one
+  cacheCompat: (id: number, body: { query?: string }) =>
+    json<CacheCompat>(`/charts/${id}/cache-compat`, jsonBody('POST', body)),
   cancelBackpop: (chartId: number, runId: number) =>
     json<BackpopRun>(`/charts/${chartId}/backpop-runs/${runId}/cancel`, { method: 'POST' }),
   freshness: (id: number) => json<Freshness>(`/charts/${id}/freshness`),

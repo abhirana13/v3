@@ -7,6 +7,8 @@ import { QueryBox } from './QueryBox'
 import { DimsMetricsTable } from './DimsMetricsTable'
 import type { ConfigColumn } from './DimsMetricsTable'
 import { BackpopulateModal } from './BackpopulateModal'
+import type { BackpopRequestDraft } from './BackpopulateModal'
+import type { CacheCompat } from '../../api/types'
 import { BackpopHistory } from './BackpopHistory'
 import { DeleteConfirm } from './DeleteConfirm'
 
@@ -33,7 +35,10 @@ export interface ConfigViewProps {
   onReorderColumns: (names: string[]) => void
   onBack: () => void
   onDelete?: () => void
-  onSaveDraft: () => void; onSaveBackpopulate: (r: { start: string; end: string; force: boolean }) => void
+  onSaveDraft: () => void; onSaveBackpopulate: (r: BackpopRequestDraft) => void
+  /** chart's query differs from the one its cache was built with (saved OR still drafted) */
+  queryChanged: boolean
+  onCheckCompat?: () => Promise<CacheCompat | null>
   backpopDefaults: { start: string; end: string }
   saving?: boolean; saveError?: string | null; saveOk?: string | null
   runs?: BackpopRun[]
@@ -149,7 +154,7 @@ export function ConfigView(p: ConfigViewProps) {
         </div>
       </div>
 
-      <BackpopulateModal open={backpopOpen} defaultStart={p.backpopDefaults.start} defaultEnd={p.backpopDefaults.end} onClose={() => setBackpopOpen(false)} onConfirm={(r) => { setBackpopOpen(false); p.onSaveBackpopulate(r) }} />
+      <BackpopulateModal open={backpopOpen} defaultStart={p.backpopDefaults.start} defaultEnd={p.backpopDefaults.end} queryChanged={p.queryChanged} onCheckCompat={p.onCheckCompat} onClose={() => setBackpopOpen(false)} onConfirm={(r) => { setBackpopOpen(false); p.onSaveBackpopulate(r) }} />
       <DeleteConfirm open={deleteOpen} name={p.chartTitleLabel} onClose={() => setDeleteOpen(false)} onConfirm={() => { setDeleteOpen(false); p.onDelete && p.onDelete() }} />
       {p.toast && (
         <div className="pointer-events-none fixed bottom-5 left-1/2 z-[70] -translate-x-1/2 rounded-lg bg-slate-800 px-4 py-2 text-[13px] font-medium text-white shadow-lg">{p.toast}</div>

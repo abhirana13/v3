@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { BackpopRun, ChartSummary, ChartWriteBody } from '../../api/types'
 import { ConfigView } from './ConfigView'
@@ -114,6 +114,16 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   const [loadError, setLoadError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [runs, setRuns] = useState<BackpopRun[]>([])
+  /* Does this chart's cache predate its current query?
+     Two sources, because neither alone is enough:
+       * the backend compares the SAVED query's hash against the cache's,
+       * `loadedQuery` catches the edit sitting in the textarea RIGHT NOW, which is the
+         actual flow — you change the SQL and press Backpopulate without saving first
+         (the backpop saves for you), so at the moment the dialog opens the server still
+         sees the old query and would report no change at all. */
+  const [serverQueryChanged, setServerQueryChanged] = useState(false)
+  const [hasCache, setHasCache] = useState(false)
+  const loadedQuery = useRef('')
 
   /* ---- available Redshift databases for the selector ---- */
   useEffect(() => { api.datasources().then(setDatasources).catch(() => {}) }, [])
@@ -137,6 +147,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
           dataRecency: String(c.default_end_offset_days ?? 2),
         })
         setQuery(c.query)
+        loadedQuery.current = c.query
         // ALL dimensions can be the x-axis, included or not: excluding only hides a dimension
         // from the chart's filter chips. A high-cardinality date dim (install_date) is the
         // motivating case — no chip (you'd never multi-select cohorts), but still the axis.
@@ -163,8 +174,16 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   useEffect(() => {
     const id = savedId ?? (typeof target === 'number' ? target : null)
     if (id == null) return
+    const readFreshness = () =>
+      api.freshness(id)
+        .then((f) => { setServerQueryChanged(f.query_changed); setHasCache(f.latest_data_date != null) })
+        .catch(() => { /* advisory only — never let it break the config page */ })
+    readFreshness()
     const t = setInterval(() => {
-      if (!document.hidden) api.backpopRuns(id).then(setRuns).catch(() => {})
+      if (!document.hidden) {
+        api.backpopRuns(id).then(setRuns).catch(() => {})
+        readFreshness()
+      }
     }, 4000)
     return () => clearInterval(t)
   }, [savedId, target])
@@ -282,13 +301,15 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
     await loadRuns(id)
   }
 
-  const onSaveBackpopulate = async (range: { start: string; end: string; force?: boolean }) => {
+  const onSaveBackpopulate = async (range: { start: string; end: string; force?: boolean; keepCache?: boolean }) => {
     setSaving(true); setSaveError(null); setSaveOk(null); setToast(range.force ? 'Force backpopulation started…' : 'Backpopulation started…')
+    // the run that lands makes the cache current again, whatever the outcome of this one
+    if (range.keepCache) loadedQuery.current = query
     try {
       const id = await ensureSaved()
       if (id == null) { setSaving(false); setToast(null); return }
       if (generated) await putDimsMetrics(id)
-      const run = await api.backpopulate(id, { from_date: range.start, to_date: range.end, batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)), force: range.force })
+      const run = await api.backpopulate(id, { from_date: range.start, to_date: range.end, batch_size: Math.max(1, parseInt(cache.backpopBatch || '30', 10)), force: range.force, keep_cache: range.keepCache })
       await loadRuns(id)
       onSaved(id) // refresh chart list in the background; stay on this page
       if (run.status === 'queued' || run.status === 'running') {
@@ -348,6 +369,19 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
   }
 
   const backpopDefaults = useMemo(() => ({ start: isoDaysAgo(parseInt(cache.backpopDays || '7', 10)), end: todayIso() }), [cache.backpopDays])
+  /* Only a warning when there is actually a cache to lose — a chart that has never been
+     backpopulated has nothing at risk, and saying otherwise would train people to ignore it. */
+  const queryChanged = hasCache && (serverQueryChanged || query !== loadedQuery.current)
+
+  /* The draft query is what the dialog must ask about — the edit is usually still unsaved
+     at the moment Backpopulate is clicked. Null when there's no saved chart yet, which also
+     means there is no cache to protect. */
+  const onCheckCompat = useCallback(async () => {
+    const id = savedId ?? (typeof target === 'number' ? target : null)
+    if (id == null) return null
+    return api.cacheCompat(id, { query })
+  }, [savedId, target, query])
+
   const queryModeWarning = useMemo(() => placeholderModeWarning(query, curDateValue(cache.curDateBehaviour)), [query, cache.curDateBehaviour])
 
   if (loadError) return <div className="flex h-full items-center justify-center text-[14px] text-rose-500">Failed to load chart: {loadError}</div>
@@ -370,6 +404,7 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       dims={{ ...dims, axisOptions }} onAxisFieldChange={(patch) => setDims((d) => ({ ...d, ...patch }))} columns={columns} onColumnChange={onColumnChange} onReorderColumns={onReorderColumns}
       onBack={onBack} onDelete={savedId != null ? onDelete : undefined}
       onSaveDraft={onSaveDraft} onSaveBackpopulate={onSaveBackpopulate} backpopDefaults={backpopDefaults}
+      queryChanged={queryChanged} onCheckCompat={onCheckCompat}
       saving={saving} saveError={saveError} saveOk={saveOk}
       runs={runs} onCancelRun={onCancelRun} toast={toast}
     />
