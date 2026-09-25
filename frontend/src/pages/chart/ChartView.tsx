@@ -30,7 +30,7 @@ export interface ChartViewProps {
   chartType: string; onChartTypeChange: (v: string) => void
   granularity: string; onGranularityChange: (v: string) => void
   dateRange: { start: string; end: string }; onDateRangeChange: (s: string, e: string) => void
-  dimensions: UIDimension[]; allToggle: boolean
+  dimensions: UIDimension[]; allToggle: boolean; canRestoreSplit: boolean
   onDimensionToggleValue: (k: string, v: string) => void
   onDimensionSetAll: (k: string, on: boolean) => void
   onDimensionToggleSplit: (k: string) => void
@@ -215,7 +215,7 @@ export function ChartView(p: ChartViewProps) {
       </div>
 
       <DimensionFilterBar
-        dimensions={p.dimensions} allToggle={p.allToggle}
+        dimensions={p.dimensions} allToggle={p.allToggle} canRestoreSplit={p.canRestoreSplit}
         onToggleValue={p.onDimensionToggleValue} onSetAll={p.onDimensionSetAll}
         onToggleSplit={p.onDimensionToggleSplit}
         onAllToggle={p.onAllToggle} onAddDimension={p.onAddDimension}

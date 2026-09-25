@@ -61,19 +61,37 @@ function DimensionChip({ dimension, onToggleValue, onSetAll, onToggleSplit }: {
 }
 
 /* ------------------------------------------------------- DimensionFilterBar */
-export function DimensionFilterBar({ dimensions, allToggle, onToggleValue, onSetAll, onToggleSplit, onAllToggle, onAddDimension }: {
+export function DimensionFilterBar({ dimensions, allToggle, canRestoreSplit, onToggleValue, onSetAll, onToggleSplit, onAllToggle, onAddDimension }: {
   dimensions: UIDimension[]
   allToggle: boolean
+  /** false => checked with nothing to restore, so unchecking would do nothing */
+  canRestoreSplit: boolean
   onToggleValue: (k: string, v: string) => void
   onSetAll: (k: string, on: boolean) => void
   onToggleSplit: (k: string) => void
   onAllToggle: (on: boolean) => void
   onAddDimension: () => void
 }) {
+  // Disabled whenever a click could not change anything — the two ways that happens are a
+  // chart with no dimensions at all, and everything already aggregated with no earlier split
+  // to return to. Both used to render as a live, unchecked-or-checked box that simply ignored
+  // you, which is the bug this control had in the first place.
+  const noDimensions = dimensions.length === 0
+  const allDisabled = noDimensions || (allToggle && !canRestoreSplit)
   return (
     <div className="flex items-center gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
-      <label className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white py-[5px] px-2 text-[13px] text-slate-600" title="Aggregate all dimensions (clear every split)">
-        <Checkbox checked={allToggle} onChange={onAllToggle} />
+      <label
+        className={'flex items-center gap-1.5 rounded-md border border-slate-200 bg-white py-[5px] px-2 text-[13px] ' + (allDisabled ? 'text-slate-400' : 'text-slate-600')}
+        title={
+          noDimensions
+            ? 'This chart has no dimensions to aggregate'
+            : allToggle
+              ? (canRestoreSplit
+                  ? 'Uncheck to go back to the splits you had before'
+                  : 'Everything is aggregated, and there are no earlier splits to go back to')
+              : 'Aggregate all dimensions (clear every split)'
+        }>
+        <Checkbox checked={allToggle} disabled={allDisabled} onChange={onAllToggle} />
         <span className="font-medium">All</span>
       </label>
       <div className="flex flex-wrap items-center gap-2">

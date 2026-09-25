@@ -21,9 +21,15 @@ export const Ic: Record<string, IconFn> = {
   download: (p) => (<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 3v12M7 11l5 4 5-4M5 21h14" /></svg>),
 }
 
-/* Square checkbox with indeterminate state. */
-export function Checkbox({ checked, indeterminate, onChange, id, title }: {
-  checked?: boolean; indeterminate?: boolean; onChange?: (v: boolean) => void; id?: string; title?: string
+/* Square checkbox with indeterminate state.
+ *
+ * `disabled` exists for the case where a box is checked and there is genuinely nothing for
+ * unchecking it to do. Rendering it live and letting the click no-op is what made the master
+ * "All" read as broken: it looked interactive, so a click that changed nothing looked like a
+ * failure rather than an answer. */
+export function Checkbox({ checked, indeterminate, onChange, id, title, disabled }: {
+  checked?: boolean; indeterminate?: boolean; onChange?: (v: boolean) => void
+  id?: string; title?: string; disabled?: boolean
 }) {
   return (
     <span
@@ -31,9 +37,11 @@ export function Checkbox({ checked, indeterminate, onChange, id, title }: {
       title={title}
       role="checkbox"
       aria-checked={indeterminate ? 'mixed' : !!checked}
-      onClick={(e) => { e.stopPropagation(); onChange && onChange(!checked) }}
+      aria-disabled={disabled || undefined}
+      onClick={(e) => { e.stopPropagation(); if (!disabled) onChange && onChange(!checked) }}
       className={
-        'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border transition-colors cursor-pointer ' +
+        'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border transition-colors ' +
+        (disabled ? 'cursor-not-allowed opacity-45 ' : 'cursor-pointer ') +
         (checked || indeterminate ? 'border-sky-500 bg-sky-500 text-white' : 'border-slate-300 bg-white hover:border-slate-400')
       }
     >

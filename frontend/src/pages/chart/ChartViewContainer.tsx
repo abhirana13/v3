@@ -141,11 +141,19 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
   // false until this chart's saved state has been applied, so the persist effect below
   // can't overwrite it with the freshly-mounted defaults before restore happens
   const hydrated = useRef(false)
+  // Splits in force the last time the master "All" collapsed them, so unchecking All can put
+  // them back. Declared here rather than beside onAllToggle because the chart-change effect
+  // below clears it, and a ref has to exist before the effect that resets it reads.
+  const lastSplit = useRef<string[]>([])
 
   /* ---- load config + dimension values + date extent on chart change ---- */
   useEffect(() => {
     let alive = true
     hydrated.current = false // don't persist until this chart's state is restored
+    // The "All" undo memory belongs to the chart it was captured on. Two charts can share a
+    // dimension name (country is on most of them), so carrying it across would let Uncheck
+    // apply a split the viewer never chose on THIS chart.
+    lastSplit.current = []
     setError(null); setCfg(null); setMetrics([]); setDimensions([]); setChartData([])
     ;(async () => {
       try {
@@ -461,11 +469,32 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
   const onDimensionToggleSplit = useCallback((key: string) => {
     setDimensions((ds) => ds.map((d) => d.key !== key ? d : { ...d, split: !d.split }))
   }, [])
-  // master "All": checked when nothing is split; toggling re-aggregates (clears every split)
+  /* ---- master "All" ----
+     Checked when nothing is split, i.e. when every dimension chip is checked.
+
+     Checking it collapses every split. UNCHECKING restores the splits that were there before
+     that collapse — it does NOT un-check every chip, because a chip being unchecked means
+     "split by me", so clearing them all would split by every dimension at once and blow past
+     the series cap with a chart nobody asked for.
+
+     This used to take no argument and unconditionally clear every split, so the second click
+     re-ran the same clear, `allToggle` recomputed to true, and the box stayed checked — the
+     control looked broken because half of its behaviour was missing. */
   const allToggle = dimensions.length > 0 && dimensions.every((d) => !d.split)
-  const onAllToggle = useCallback(() => {
-    setDimensions((ds) => ds.map((d) => ({ ...d, split: false })))
-  }, [])
+  // Only meaningful to uncheck if we have splits to put back that still exist on this chart.
+  const canRestoreSplit = allToggle && lastSplit.current.some((k) => dimensions.some((d) => d.key === k))
+  const onAllToggle = useCallback((on: boolean) => {
+    if (on) {
+      // Remember the shape being collapsed. Guarded on non-empty so clicking All twice in a
+      // row doesn't overwrite the memory with "nothing was split".
+      const split = dimensions.filter((d) => d.split).map((d) => d.key)
+      if (split.length) lastSplit.current = split
+      setDimensions((ds) => ds.map((d) => ({ ...d, split: false })))
+      return
+    }
+    const wanted = new Set(lastSplit.current)
+    setDimensions((ds) => (ds.some((d) => wanted.has(d.key)) ? ds.map((d) => ({ ...d, split: wanted.has(d.key) })) : ds))
+  }, [dimensions])
 
   /* ---- metric callbacks ---- */
   const onMetricToggle = useCallback((id: string) => setMetrics((ms) => ms.map((m) => m.id === id ? { ...m, visible: !m.visible } : m)), [])
@@ -594,7 +623,7 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
       chartType={chartType} onChartTypeChange={setChartType}
       granularity={granularity} onGranularityChange={setGranularity}
       dateRange={{ start: dateRange.start, end: recencyEnd }} onDateRangeChange={(s, e) => setDateRange({ start: s, end: e })}
-      dimensions={dimensions} allToggle={allToggle}
+      dimensions={dimensions} allToggle={allToggle} canRestoreSplit={canRestoreSplit}
       onDimensionToggleValue={onDimensionToggleValue} onDimensionSetAll={onDimensionSetAll}
       onDimensionToggleSplit={onDimensionToggleSplit} splitNotice={splitNotice} splitInfo={splitInfo}
       onAllToggle={onAllToggle} onAddDimension={() => alert('Add dimension is configured in the Query Editor (Phase 9).')}
