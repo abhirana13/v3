@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { BackpopRun, ChartSummary, ChartWriteBody } from '../../api/types'
 import { ConfigView } from './ConfigView'
+import { mergeIntrospectedColumns } from './mergeColumns'
 import type { ConfigColumn, VarRow } from './ConfigView'
 
 const DR_DAYS: Record<string, number> = { 'Last 30 Days': 30, 'Last 60 Days': 60, 'Last 90 Days': 90, 'Last 120 Days': 120, 'Last 365 Days': 365 }
@@ -225,15 +226,12 @@ export function ConfigContainer({ target, onBack, onSaved, onDeleted, charts }: 
       if (id == null) { setGenerating(false); return }
       const r = await api.introspect(id)
       const dimNames = r.dimensions.map((d) => d.name)
-      const introspected = new Set([...r.dimensions.map((d) => d.name), ...r.metrics.map((m) => m.name)])
-      // re-introspecting reads the query's columns; formula metrics aren't column-backed,
-      // so keep the ones the user built in the chart view rather than dropping them
-      const keptFormulas = columns.filter((c) => c.classification === 'Metric' && c.formula && !introspected.has(c.name))
-      setColumns([
-        ...r.dimensions.map<ConfigColumn>((d) => ({ name: d.name, classification: 'Dimension', dataType: d.data_type || '—', independentOf: [], valueOrder: 'natural', included: true })),
-        ...r.metrics.map<ConfigColumn>((m) => ({ name: m.name, classification: 'Metric', dataType: m.data_type || '—', independentOf: [], included: true })),
-        ...keptFormulas,
-      ])
+      // Introspection owns the column SET and each column's data type; every other per-column
+      // setting belongs to the editor and is carried across by name. Rebuilding the table from
+      // the introspection result alone silently reset independentOf, decimals, unit, axis,
+      // value order and included — and regenerating is exactly what you must do after a query
+      // edit, so the loss landed on the people least expecting it. See mergeColumns.ts.
+      setColumns((prev) => mergeIntrospectedColumns(prev, r))
       // keep a chosen pivot x-axis if the re-introspected query still has that dimension,
       // so regenerating columns doesn't silently reset the chart back to a time series
       setDims((s) => ({
