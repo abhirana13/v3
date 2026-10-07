@@ -8,6 +8,8 @@ import { decodeSelection, encodeSelection, loadChartView, saveChartView } from '
 import type { SavedChartView } from './viewState'
 import type { ChartViewSeed } from './urlState'
 import { naturalCompare } from './transforms'
+import { COMPARE_OFF, comparisonBucket, comparisonWindow, compareLabel, isComparing, offsetsWithinCap } from './compare'
+import type { CompareCfg } from './compare'
 import { SERIES_COLORS, maxSeries } from '../../charts/palette'
 
 // Series colours live in charts/palette.ts — shared with dashboard widgets so one chart is the
@@ -89,6 +91,15 @@ function seededView(saved: SavedChartView | null, seed?: ChartViewSeed | null): 
   }
 }
 
+/* Advisory when the series cap forced comparison periods to be dropped. Named periods, not a
+   count: "W-3, W-4 hidden" is actionable, "2 hidden" is not. */
+function cmpNotice(requested: number[], kept: number[]): string | null {
+  if (requested.length === kept.length) return null
+  const lost = requested.filter((n) => !kept.includes(n))
+  if (!lost.length) return `Comparison periods are hidden — this split already uses all ${SERIES_CAP} series. Deselect a dimension or filter values down.`
+  return `Comparison ${lost.length === 1 ? 'period' : 'periods'} ${lost.map((n) => `-${n}`).join(', ')} hidden — the split already uses most of the ${SERIES_CAP}-series budget. Deselect a dimension or filter values down.`
+}
+
 export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoHome, onEditChart, onCreateChart }: {
   chartId: number
   // cuts carried in the URL (a dashboard widget's "open the source chart" link). Takes precedence
@@ -122,6 +133,8 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
   const [toast, setToast] = useState<string | null>(null)
   const [dataReloadKey, setDataReloadKey] = useState(0)
   const [endOffset, setEndOffset] = useState(2) // chart data ends this many days before today
+  // period-over-period overlay; view-only, never persisted to the chart's definition
+  const [compare, setCompare] = useState<CompareCfg>(COMPARE_OFF)
   const [freshness, setFreshness] = useState<Freshness | null>(null)
   // Pivot x-axis: null => plot over the time column (normal time series). A dimension name
   // => the backend keys rows on that dimension instead (time collapses to a filter), so the
@@ -328,14 +341,31 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
 
     const token = ++fetchToken.current
     setLoading(true); setError(null)
-    api.getData(chartId, {
+    const baseQuery = {
       granularity: GRAN[granularity], from: dateRange.start || null, to: recencyEnd || null,
       // Always send an EXPLICIT axis: the chart's saved x_axis is applied when loading the
       // view (above), so from here the user's choice must win. Sending nothing would let the
       // backend re-apply the saved default, making the picker's "Time" option a no-op on a
       // chart that defaults to a pivot. The time column normalizes to a plain time series.
       metrics: names, groupBy, filters, hideZero, xAxis: xAxisDim || cfg.time_column,
-    }).then((resp) => {
+    }
+    /* Period comparison fetches the SAME query over shifted windows — same metrics, same
+       splits, same filters — so the overlay is the identical cut of data, just earlier. Doing
+       it here rather than in SQL keeps the backend contract unchanged and keeps the comparison
+       honest: it is literally the same question asked of a different window.
+
+       Only in time mode. A pivoted chart's x-axis is a dimension, not a date, so there is no
+       window to shift and nothing to align the overlay against. */
+    const cmpOffsets = (!xAxisDim && isComparing(compare))
+      ? [...compare.offsets].sort((a, b) => a - b)
+      : []
+    Promise.all([
+      api.getData(chartId, baseQuery),
+      ...cmpOffsets.map((n) => {
+        const w = comparisonWindow(dateRange.start, recencyEnd, compare.unit, n, GRAN[granularity])
+        return api.getData(chartId, { ...baseQuery, from: w.from, to: w.to })
+      }),
+    ]).then(([resp, ...cmpResps]) => {
       if (token !== fetchToken.current) return
       // Row key: the pivot dimension's column when pivoting, else the time column.
       const colByNameAll = new Map(cfg.dimensions.map((d) => [d.name, d.column_name]))
@@ -362,10 +392,31 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
         ? resp.rows.filter((r) => inWindow.has(String(r[tc])))
         : resp.rows
 
+      // Comparison rows indexed by their own bucket date (and dim-combo, when split). Looked
+      // up through comparisonBucket(), which snaps the shifted date onto the bucket the
+      // backend would have grouped it into — so weekly buckets compared a year back still
+      // land on a Monday that exists.
+      const cmpKey = (mKey: string, n: number) => `${mKey}__cmp${n}`
+      const cmpSuffix = (n: number) => ` · ${compareLabel(compare.unit, n)}`
+
       if (splitDims.length === 0) {
-        // time-only aggregate: one series per visible metric (unchanged behavior)
-        setChartSeries(visibleMetrics.map((m) => ({ key: m.key, label: m.name, color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name })))
+        // time-only aggregate: one series per visible metric, plus one per comparison period
+        const keep = offsetsWithinCap(cmpOffsets, visibleMetrics.length, SERIES_CAP)
+        const series: UISeries[] = []
+        for (const m of visibleMetrics) {
+          series.push({ key: m.key, label: m.name, color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name })
+          for (const n of keep) {
+            series.push({ key: cmpKey(m.key, n), label: m.name + cmpSuffix(n), color: m.color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, compareOffset: n })
+          }
+        }
+        setChartSeries(series)
+        setSplitInfo(cmpNotice(cmpOffsets, keep))
+
         const byT = new Map(plotRows.map((r) => [String(r[tc]), r]))
+        const cmpByT = keep.map((n) => ({
+          n,
+          rows: new Map((cmpResps[cmpOffsets.indexOf(n)]?.rows || []).map((r) => [String(r[tc]), r])),
+        }))
         const dates = buckets.length
           ? buckets
           : [...new Set(plotRows.map((r) => String(r[tc])))].sort(naturalCompare)
@@ -373,6 +424,10 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
           const r = byT.get(d)
           const row: ChartRow = { date: d }
           for (const n of names) row[n] = r ? (r[n] ?? null) : null
+          for (const { n, rows } of cmpByT) {
+            const cr = rows.get(comparisonBucket(d, compare.unit, n, GRAN[granularity]))
+            for (const mName of names) row[cmpKey(mName, n)] = cr ? ((cr[mName] as number) ?? null) : null
+          }
           return row
         }))
         setLoading(false)
@@ -423,16 +478,25 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
       // With several split dims the FIRST one is the primary grouping, so its setting wins.
       const primaryOrder = cfg.dimensions.find((d) => d.name === splitDims[0]?.key)?.value_order
       order.sort(primaryOrder === 'metric' ? byTotal : naturalCompare)
+      // Comparison periods are dropped furthest-first when the split already uses most of the
+      // cap — one colour per series is the rule, and a comparison reuses its base series'
+      // colour, so the budget is (base series) x (1 + periods).
+      const keepCmp = offsetsWithinCap(cmpOffsets, order.length * visibleMetrics.length, SERIES_CAP)
       setSplitInfo(
         dropped
           ? `Showing the ${SERIES_CAP} largest of ${present.length} series${rank ? ` by ${rank.name}` : ''} — ${dropped} smaller ${dropped === 1 ? 'one is' : 'ones are'} hidden. Filter values down or deselect a dimension to see them.`
-          : null,
+          : cmpNotice(cmpOffsets, keepCmp),
       )
 
       const series: UISeries[] = []
       let ci = 0
       for (const combo of order) for (const m of visibleMetrics) {
-        series.push({ key: sKey(m.key, combo), label: multi ? `${m.name} · ${combo}` : combo, color: PALETTE[ci % PALETTE.length], axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo })
+        const color = PALETTE[ci % PALETTE.length]
+        const label = multi ? `${m.name} · ${combo}` : combo
+        series.push({ key: sKey(m.key, combo), label, color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo })
+        for (const n of keepCmp) {
+          series.push({ key: cmpKey(sKey(m.key, combo), n), label: label + cmpSuffix(n), color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo, compareOffset: n })
+        }
         ci++
       }
       setChartSeries(series)
@@ -451,13 +515,29 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
         if (!row) { row = { date }; byDate.set(date, row) }
         for (const m of visibleMetrics) row[sKey(m.key, combo)] = (r[m.name] as number) ?? null
       }
+      // Comparison windows, keyed by (their own bucket, combo) and written onto the CURRENT
+      // bucket the overlay belongs to.
+      for (const n of keepCmp) {
+        const resp2 = cmpResps[cmpOffsets.indexOf(n)]
+        const idx = new Map<string, Record<string, unknown>>()
+        for (const r of resp2?.rows || []) idx.set(`${String(r[tc])}|${comboOf(r)}`, r)
+        for (const [date, row] of byDate) {
+          const src = comparisonBucket(date, compare.unit, n, GRAN[granularity])
+          for (const combo of order) {
+            const cr = idx.get(`${src}|${combo}`)
+            for (const m of visibleMetrics) {
+              row[cmpKey(sKey(m.key, combo), n)] = cr ? ((cr[m.name] as number) ?? null) : null
+            }
+          }
+        }
+      }
       setChartData([...byDate.values()].sort((a, b) => naturalCompare(a.date, b.date)))
       setLoading(false)
     }).catch((e) => {
       if (token !== fetchToken.current) return
       setError(String(e.message || e)); setLoading(false)
     })
-  }, [cfg, chartId, visibleMetrics, granularity, dateRange.start, recencyEnd, filters, hideZero, splitKey, dataReloadKey, xAxisDim, xAxisIsDate])
+  }, [cfg, chartId, visibleMetrics, granularity, dateRange.start, recencyEnd, filters, hideZero, splitKey, dataReloadKey, xAxisDim, xAxisIsDate, compare])
 
   /* ---- dimension callbacks ---- */
   const onDimensionToggleValue = useCallback((key: string, val: string) => {
@@ -624,6 +704,9 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
       granularity={granularity} onGranularityChange={setGranularity}
       dateRange={{ start: dateRange.start, end: recencyEnd }} onDateRangeChange={(s, e) => setDateRange({ start: s, end: e })}
       dimensions={dimensions} allToggle={allToggle} canRestoreSplit={canRestoreSplit}
+      compare={compare} onCompareChange={setCompare}
+      compareDisabled={!!xAxisDim}
+      compareDisabledReason={xAxisDim ? `This chart is pivoted on ${xAxisDim}, so there is no time axis to compare across. Switch the X-Axis back to time to compare periods.` : undefined}
       onDimensionToggleValue={onDimensionToggleValue} onDimensionSetAll={onDimensionSetAll}
       onDimensionToggleSplit={onDimensionToggleSplit} splitNotice={splitNotice} splitInfo={splitInfo}
       onAllToggle={onAllToggle} onAddDimension={() => alert('Add dimension is configured in the Query Editor (Phase 9).')}

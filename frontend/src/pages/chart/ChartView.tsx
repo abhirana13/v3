@@ -9,6 +9,8 @@ import { FreshnessChip } from './FreshnessChip'
 import { downloadCsv, downloadPng } from './exportChart'
 import { ChartPicker } from './ChartPicker'
 import { DimensionFilterBar } from './DimensionFilterBar'
+import { ComparePicker } from './ComparePicker'
+import type { CompareCfg } from './compare'
 import { MetricsPanel } from './MetricsPanel'
 import { MetricSettingsModal } from './MetricSettingsModal'
 import type { MetricDraft } from './MetricSettingsModal'
@@ -31,6 +33,9 @@ export interface ChartViewProps {
   granularity: string; onGranularityChange: (v: string) => void
   dateRange: { start: string; end: string }; onDateRangeChange: (s: string, e: string) => void
   dimensions: UIDimension[]; allToggle: boolean; canRestoreSplit: boolean
+  compare: CompareCfg; onCompareChange: (c: CompareCfg) => void
+  /** pivoted charts have no time axis to shift, so comparison is unavailable there */
+  compareDisabled: boolean; compareDisabledReason?: string
   onDimensionToggleValue: (k: string, v: string) => void
   onDimensionSetAll: (k: string, on: boolean) => void
   onDimensionToggleSplit: (k: string) => void
@@ -205,6 +210,7 @@ export function ChartView(p: ChartViewProps) {
         </span>
         {p.freshness && <FreshnessChip freshness={p.freshness} />}
         <div className="ml-auto flex items-center gap-2">
+          <ComparePicker value={p.compare} onChange={p.onCompareChange} disabled={p.compareDisabled} disabledReason={p.compareDisabledReason} />
           <Dropdown value={p.chartType} onChange={p.onChartTypeChange} options={['Line Chart', 'Bar Chart', 'Area Chart']} icon={<Ic.line />} />
           <Dropdown value={p.granularity} onChange={p.onGranularityChange} options={['Day', 'Week', 'Month']} />
           <DateRangePicker value={p.dateRange} onChange={(r) => p.onDateRangeChange(r.start, r.end)} align="right" widthClass="w-[256px]" />

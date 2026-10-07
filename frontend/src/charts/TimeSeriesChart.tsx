@@ -3,6 +3,7 @@ import * as echarts from 'echarts'
 import type { ChartRow, UISeries } from '../components/types'
 import { axisDecimals, compactAxis, formatValue } from './format'
 import { naturalCompare } from '../pages/chart/transforms'
+import { compareDash, compareOpacity } from '../pages/chart/compare'
 import { HoverCard } from './HoverCard'
 import type { HoverRow } from './HoverCard'
 import type { ChartOptions } from '../components/types'
@@ -134,12 +135,27 @@ export function TimeSeriesChart({ data, series, xLabel = 'TIME', yLabelPrimary, 
       showSymbol: d.showPoints,
       symbol: 'circle',
       symbolSize: 6,
-      lineStyle: { width: percentStacked ? 1 : 1.6, color: s.color },
-      itemStyle: { color: s.color },
-      areaStyle: percentStacked ? { opacity: 0.85, color: s.color } : (seriesType === 'area' ? { opacity: 0.12, color: s.color } : undefined),
+      // A comparison overlay is the SAME series one or more periods back, so it keeps its base
+      // series' colour and separates by weight and opacity instead of consuming a palette slot.
+      // Thinner as well as fainter: on a busy plot opacity alone still reads as a solid line
+      // and the current period stops being obviously the subject.
+      lineStyle: {
+        width: percentStacked ? 1 : (s.compareOffset ? 1.4 : 1.8),
+        color: s.color,
+        // the dash pattern is what separates W-1 from W-3; opacity only keeps the current
+        // period the obvious subject (see compare.ts)
+        type: s.compareOffset ? compareDash(s.compareOffset) : 'solid',
+        opacity: s.compareOffset ? compareOpacity(s.compareOffset) : 1,
+      },
+      itemStyle: { color: s.color, opacity: s.compareOffset ? compareOpacity(s.compareOffset) : 1 },
+      // No area fill behind a comparison: stacked translucent fills over the current period is
+      // exactly the mush this overlay exists to avoid.
+      areaStyle: percentStacked ? { opacity: 0.85, color: s.color } : (seriesType === 'area' && !s.compareOffset ? { opacity: 0.12, color: s.color } : undefined),
+      // Comparisons sit behind the current period, whatever order they were built in.
+      z: s.compareOffset ? 2 : 3,
       // 2.6px on hover-focus: with 20 similar hues on one plot, thickening the focused line is
       // how you confirm WHICH series the tooltip is describing.
-      emphasis: { focus: 'series' as const, lineStyle: { width: percentStacked ? 1 : 2.6 } },
+      emphasis: { focus: 'series' as const, lineStyle: { width: percentStacked ? 1 : 2.6, opacity: 1 } },
       connectNulls: d.connectNulls,
       data: data.map((row) => row[s.key] ?? null),
     }))

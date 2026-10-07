@@ -33,6 +33,10 @@ export interface UISeries {
   metricKey?: string // which metric this series belongs to (cuts of one metric share it)
   metricLabel?: string // the metric's display name (legend groups split series under it)
   comboLabel?: string // when split, the dimension-value cut (e.g. "D0", "US · iOS")
+  /** period-over-period overlay: 1..4 periods back. Absent on the current-period series.
+   *  Drawn in the base series' colour at reduced opacity rather than a colour of its own —
+   *  it is the same series, earlier, and the palette is one-colour-per-series. */
+  compareOffset?: number
 }
 
 export type ChartRow = Record<string, number | string | null>
