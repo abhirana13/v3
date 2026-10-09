@@ -198,3 +198,125 @@ def test_pivot_time_axis_explicit_is_time_series(client, duckdb_path):
     body = client.get(f"/charts/{cid}/data", params={"x_axis": "event_date", "group_by": ""}).json()
     assert body["x_axis"] is None  # normalized to time series
     assert {row["event_date"] for row in body["rows"]} == {"2026-06-12", "2026-06-13"}
+
+
+# ---------- 5) granularity buckets a DATE pivot, and the dedup survives it ----------
+#
+# Pivoting collapses time to a constant, which left Day/Week/Month with nothing to act on:
+# the selector was silently inert on exactly the chart most likely to need it, a cohort
+# retention chart pivoted on install_date. When the pivot dimension IS a date, the
+# granularity belongs to it — Week means "the cohorts that installed that week".
+
+
+def _cohort_chart(client, duckdb_path, name):
+    cid = _make_chart(
+        client,
+        ["install_date", "days_since_install"],
+        [
+            # installs is a property of the COHORT, not of the activity day — the dedup this
+            # whole module exists to protect
+            {"name": "installs", "column_name": "installs",
+             "independent_dimensions": ["days_since_install"]},
+            {"name": "retained_users", "column_name": "retained_users"},
+        ],
+        name,
+        x_axis="install_date",
+    )
+    rows = []
+    # Four cohorts inside one ISO week (Mon 2026-06-01 .. Thu 2026-06-04), each with a D1
+    # return. Same calendar month, so month collapses them too.
+    #
+    # The cohort SIZE lands on the D0 row only, which is how an event_date-anchored retention
+    # query actually writes it (see test_pivot_retention_cohort_shape above). Repeating it on
+    # every dsi row would double count across event_date — which is in the dedup grain whatever
+    # days_since_install is declared independent of — and that is a property of the data, not
+    # something serving could correct.
+    for day, size, d1 in ((1, 10, 6), (2, 20, 8), (3, 30, 9), (4, 40, 12)):
+        inst = date(2026, 6, day)
+        rows.append((inst, inst, 0, size, 0))
+        rows.append((date(2026, 6, day + 1), inst, 1, 0, d1))
+    _seed(
+        duckdb_path, cid,
+        [("event_date", "DATE"), ("install_date", "DATE"), ("days_since_install", "BIGINT"),
+         ("installs", "BIGINT"), ("retained_users", "BIGINT")],
+        rows,
+    )
+    return cid
+
+
+def _by_x(body, key="install_date"):
+    return {str(r[key]): r for r in body["rows"]}
+
+
+def test_date_pivot_buckets_by_granularity(client, duckdb_path):
+    cid = _cohort_chart(client, duckdb_path, "pivot-gran")
+    p = {"x_axis": "install_date", "group_by": ""}
+
+    daily = _by_x(client.get(f"/charts/{cid}/data", params={**p, "granularity": "day"}).json())
+    assert sorted(daily) == ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04"]
+
+    weekly = client.get(f"/charts/{cid}/data", params={**p, "granularity": "week"}).json()
+    assert sorted(_by_x(weekly)) == ["2026-06-01"], "the four cohorts share one ISO week"
+
+    monthly = client.get(f"/charts/{cid}/data", params={**p, "granularity": "month"}).json()
+    assert sorted(_by_x(monthly)) == ["2026-06-01"]
+
+
+def test_date_pivot_week_sums_its_days(client, duckdb_path):
+    """Bucketing must aggregate, not sample: nothing lost, nothing counted twice."""
+    cid = _cohort_chart(client, duckdb_path, "pivot-gran-sum")
+    p = {"x_axis": "install_date", "group_by": ""}
+    daily = _by_x(client.get(f"/charts/{cid}/data", params={**p, "granularity": "day"}).json())
+    weekly = _by_x(client.get(f"/charts/{cid}/data", params={**p, "granularity": "week"}).json())
+
+    assert weekly["2026-06-01"]["installs"] == sum(r["installs"] for r in daily.values()) == 100
+    assert weekly["2026-06-01"]["retained_users"] == sum(r["retained_users"] for r in daily.values()) == 35
+
+
+def test_date_pivot_bucketing_preserves_independent_metric_dedup(client, duckdb_path):
+    """The failure mode this guards: bucketing the x-axis must not re-introduce double counting.
+
+    `installs` is independent of days_since_install, so splitting by it must repeat the cohort
+    size, never multiply it. The inner MAX therefore has to stay at the RAW install_date — take
+    the maximum across a whole week instead and the week's installs collapse to its largest day.
+    """
+    cid = _cohort_chart(client, duckdb_path, "pivot-gran-indep")
+    p = {"x_axis": "install_date", "granularity": "week"}
+
+    total = _by_x(client.get(f"/charts/{cid}/data", params={**p, "group_by": ""}).json())
+    assert total["2026-06-01"]["installs"] == 100
+
+    split = client.get(f"/charts/{cid}/data", params={**p, "group_by": "days_since_install"}).json()
+    per_dsi = [r["installs"] for r in split["rows"]]
+    assert len(per_dsi) == 2, "D0 and D1"
+    assert set(per_dsi) == {100}, f"installs must repeat the week's cohort size, got {per_dsi}"
+    # the specific regressions: 40 = MAX over the week, 200 = summed across both dsi buckets
+    # 40 would mean MAX taken across the week; 200 would mean the two dsi buckets summed
+    assert 40 not in per_dsi and sum(per_dsi) == 200
+
+
+def test_non_date_pivot_ignores_granularity(client, duckdb_path):
+    """A country pivot has nothing to bucket; granularity must leave it alone."""
+    cid = _make_chart(client, ["country"], [{"name": "dau", "column_name": "dau"}], "pivot-gran-text")
+    _seed(
+        duckdb_path, cid,
+        [("event_date", "DATE"), ("country", "VARCHAR"), ("dau", "BIGINT")],
+        [(date(2026, 6, 1), "US", 10), (date(2026, 6, 2), "US", 20), (date(2026, 6, 1), "UK", 5)],
+    )
+    p = {"x_axis": "country", "group_by": ""}
+    for gran in ("day", "week", "month"):
+        rows = _by_x(client.get(f"/charts/{cid}/data", params={**p, "granularity": gran}).json(), "country")
+        assert rows["US"]["dau"] == 30 and rows["UK"]["dau"] == 5, gran
+
+
+def test_time_axis_granularity_is_unchanged(client, duckdb_path):
+    """Regression guard: the non-pivot path must behave exactly as before."""
+    cid = _make_chart(client, ["country"], [{"name": "dau", "column_name": "dau"}], "pivot-gran-time")
+    _seed(
+        duckdb_path, cid,
+        [("event_date", "DATE"), ("country", "VARCHAR"), ("dau", "BIGINT")],
+        [(date(2026, 6, 1), "US", 10), (date(2026, 6, 2), "US", 20), (date(2026, 6, 9), "US", 5)],
+    )
+    weekly = client.get(f"/charts/{cid}/data", params={"group_by": "", "granularity": "week"}).json()
+    by_week = {str(r["event_date"]): r["dau"] for r in weekly["rows"]}
+    assert by_week == {"2026-06-01": 30, "2026-06-08": 5}

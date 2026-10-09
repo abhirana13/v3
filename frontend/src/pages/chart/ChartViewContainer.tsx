@@ -379,8 +379,11 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
       // its x-values come from the data.
       const buckets = !xAxisDim
         ? dateBuckets(dateRange.start, recencyEnd, GRAN[granularity])
+        // A DATE pivot is bucketed by the backend at the chosen granularity too (the x-axis is
+        // the cohort date, so Week means "the cohorts that installed that week"). Seeding the
+        // axis at 'day' here left a monthly pivot with a daily axis that matched almost no row.
         : xAxisIsDate
-          ? dateBuckets(dateRange.start, recencyEnd, 'day')
+          ? dateBuckets(dateRange.start, recencyEnd, GRAN[granularity])
           : []
 
       // Pivoting on a date dimension: the date filter applies to the chart's TIME column,
@@ -495,7 +498,7 @@ export function ChartViewContainer({ chartId, charts, seed, onSelectChart, onGoH
         const label = multi ? `${m.name} · ${combo}` : combo
         series.push({ key: sKey(m.key, combo), label, color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo })
         for (const n of keepCmp) {
-          series.push({ key: cmpKey(sKey(m.key, combo), n), label: label + cmpSuffix(n), color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo, compareOffset: n })
+          series.push({ key: cmpKey(sKey(m.key, combo), n), label: label + cmpSuffix(n), color, axis: m.axis || 'primary', unit: m.unit, decimals: m.decimals, metricKey: m.key, metricLabel: m.name, comboLabel: combo + cmpSuffix(n), compareOffset: n })
         }
         ci++
       }

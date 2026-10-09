@@ -89,7 +89,24 @@ export const comparisonBucket = (
   bucketISO: string, unit: CompareUnit, n: number, granularity: string,
 ) => snapToBucket(shiftBack(bucketISO, unit, n), granularity)
 
-/** The fetch window for one comparison offset, covering every bucket the overlay needs. */
+/** The fetch window for one comparison offset, covering every bucket the overlay needs.
+ *
+ * `to` is the shifted END DATE, deliberately NOT extended to the end of its bucket.
+ *
+ * At week or month granularity the current window's trailing bucket is usually partial — a
+ * window ending Tue 4 Aug makes the last weekly bucket Mon+Tue, not a whole week. Shifting the
+ * whole window by exactly one period makes the comparison's trailing bucket partial in the
+ * same way, over the same weekdays, so the two are like for like: "the first two days of this
+ * week against the first two days of last week".
+ *
+ * Rounding `to` up to the bucket end would put a COMPLETE previous week against an incomplete
+ * current one, and the chart would show a cliff at the right-hand edge that is an artefact of
+ * the window rather than anything in the data. Measured on chart 18: the honest comparison is
+ * 10,450 against 17,867 (two days each); rounding up would have shown 10,450 against 60,127.
+ *
+ * `from` IS snapped backwards to a bucket start, because that bucket is fully inside the
+ * window and only needs to be reachable by the lookup.
+ */
 export function comparisonWindow(
   start: string, end: string, unit: CompareUnit, n: number, granularity: string,
 ) {

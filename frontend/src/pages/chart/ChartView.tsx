@@ -11,6 +11,7 @@ import { ChartPicker } from './ChartPicker'
 import { DimensionFilterBar } from './DimensionFilterBar'
 import { ComparePicker } from './ComparePicker'
 import type { CompareCfg } from './compare'
+import { compareDashCss, compareOpacity } from './compare'
 import { MetricsPanel } from './MetricsPanel'
 import { MetricSettingsModal } from './MetricSettingsModal'
 import type { MetricDraft } from './MetricSettingsModal'
@@ -138,7 +139,15 @@ export function ChartView(p: ChartViewProps) {
     return (
       <button key={s.key} type="button" onClick={() => toggleHidden(hideKey(s))} title={off ? 'Click to show' : 'Click to hide'}
         className={'flex items-center gap-1.5 text-[12px] transition ' + (off ? 'text-slate-400 line-through opacity-50' : 'text-slate-600 hover:text-slate-900')}>
-        <span className="h-[3px] w-4 shrink-0 rounded-full" style={{ background: off ? '#cbd5e1' : s.color }} />{text}
+        {/* The swatch draws the series' real line: colour AND dash pattern. A solid bar for
+            every entry made a comparison legend unreadable — four chips, one colour, no way to
+            tell which was W-1. butt caps, not round: a round cap on a 1.5px dot grows it by the
+            stroke width and the dotted pattern closes up into a solid line at this size. */}
+        <svg width="22" height="6" viewBox="0 0 22 6" className="shrink-0" aria-hidden>
+          <line x1="1" y1="3" x2="21" y2="3" stroke={off ? '#cbd5e1' : s.color} strokeWidth="2.5"
+            strokeDasharray={s.compareOffset ? compareDashCss(s.compareOffset) : undefined}
+            opacity={off || !s.compareOffset ? 1 : compareOpacity(s.compareOffset)} />
+        </svg>{text}
       </button>
     )
   }

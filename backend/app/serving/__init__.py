@@ -74,6 +74,33 @@ def _columns(conn, table: str) -> set:
     return {r[1] for r in conn.execute(f"PRAGMA table_info({_q(table)})").fetchall()}
 
 
+def _column_types(conn, table: str) -> dict:
+    """{column: declared DuckDB type} for the cache table."""
+    if not _table_exists(conn, table):
+        return {}
+    return {r[1]: str(r[2]).upper() for r in conn.execute(f"PRAGMA table_info({_q(table)})").fetchall()}
+
+
+def _pivot_bucket(col: str, granularity: str, col_type: str | None) -> str:
+    """How to SELECT a pivoted x-axis dimension, bucketed by the chosen granularity.
+
+    Pivoting puts a dimension on the x-axis and collapses time to a constant, which left the
+    Day/Week/Month selector with nothing to act on — it was silently inert on exactly the
+    charts most likely to need it, a cohort retention chart pivoted on install_date. When the
+    pivot dimension is itself a DATE, the granularity belongs to IT: weekly retention is the
+    cohorts that installed that week, aggregated together.
+
+    Only for genuine DATE/TIMESTAMP columns. A date held as VARCHAR is left alone rather than
+    guessed at: grouping on a failed cast would collapse every row into one NULL bucket, which
+    looks like data loss rather than an unsupported pivot.
+    """
+    if granularity == "day" or not col_type:
+        return _q(col)
+    if not (col_type.startswith("DATE") or col_type.startswith("TIMESTAMP")):
+        return _q(col)
+    return f"CAST(date_trunc('{granularity}', {_q(col)}) AS DATE)"
+
+
 def _build_where(req: DataRequest, time_col: str, dim_by_name: dict, exclude_dims=frozenset()):
     parts: list[str] = []
     params: list = []
@@ -109,9 +136,16 @@ def _run_keyset(
         _CONST_BUCKET if collapse_time
         else f"CAST(date_trunc('{req.granularity}', CAST({_q(time_col)} AS DATE)) AS DATE)"
     )
+    # In pivot mode the FIRST requested dim is the x-axis (serve_data moves it there); when it
+    # is a date column the granularity buckets it, since time itself has collapsed.
+    types = _column_types(conn, table)
+    x_name = requested_dims[0] if (collapse_time and requested_dims) else None
     select = [f"{bucket_expr} AS _t"]
     for d_name in requested_dims:
-        select.append(_q(dim_by_name[d_name].column_name))
+        col = dim_by_name[d_name].column_name
+        select.append(
+            _pivot_bucket(col, req.granularity, types.get(col)) if d_name == x_name else _q(col)
+        )
 
     where, params = _build_where(req, time_col, dim_by_name)
     order = ", ".join(str(i + 1) for i in range(len(select)))
@@ -162,11 +196,20 @@ def _run_metric(
         f"GROUP BY {', '.join(inner_group)}"
     )
 
-    outer_select = [f"{bucket_expr} AS _t"] + [_q(c) for c in eff_cols]
+    # The x-axis dimension is bucketed in the OUTER query only. The inner MAX must stay at the
+    # finest grain (raw install_date, not its week) or the dedup would take one maximum across
+    # a whole week and silently undercount — the independent-metric rule this module exists for.
+    types = _column_types(conn, table)
+    x_name = requested_dims[0] if (collapse_time and requested_dims) else None
+    x_col = dim_by_name[x_name].column_name if x_name else None
+    def _out(col: str) -> str:
+        return _pivot_bucket(col, req.granularity, types.get(col)) if col == x_col else _q(col)
+
+    outer_select = [f"{bucket_expr} AS _t"] + [_out(c) for c in eff_cols]
     # In pivot mode the bucket is a constant literal, so group only by the effective dims
     # (may be empty → one total row); a constant literal in SELECT needs no GROUP BY entry.
     group_cols = (
-        [_q(c) for c in eff_cols] if collapse_time
+        [_out(c) for c in eff_cols] if collapse_time
         else [bucket_expr] + [_q(c) for c in eff_cols]
     )
     group_clause = f" GROUP BY {', '.join(group_cols)}" if group_cols else ""
