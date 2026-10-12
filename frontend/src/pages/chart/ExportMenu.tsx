@@ -13,7 +13,7 @@ export function ExportMenu({ onPng, onCsv }: { onPng: () => void; onCsv: () => v
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen((o) => !o)} title="Export chart" className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-[7px] text-[13px] font-medium text-slate-600 hover:border-slate-300">
-        <Ic.download /> Export <Ic.caret className="text-slate-400" />
+        <Ic.download /><span className="hidden 2xl:inline">Export</span><Ic.caret className="text-slate-400" />
       </button>
       {open && (
         <div className="absolute right-0 top-[calc(100%+4px)] z-30 w-40 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-xl">

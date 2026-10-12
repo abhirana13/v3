@@ -204,28 +204,33 @@ export function ChartView(p: ChartViewProps) {
       </header>
 
       {/* chart title bar */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 py-2.5">
+      {/* min-w-0 + flex-wrap: the title absorbs the slack and ellipses, so this stays ONE line
+          down to ~1190px; below that the toolbar wraps rather than scrolling the document.
+          At 1280x720 — a 1080p Windows laptop at 150% scaling, Windows' own recommended
+          default — this bar had exactly zero headroom, so a longer chart name broke the title
+          onto four lines and grew the header from 56px to 111px. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-2.5">
         <span className={'flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-white ' + (p.error ? 'bg-rose-500' : 'bg-emerald-500')}>{p.error ? '!' : '✓'}</span>
-        <h1 className="text-[15px] font-semibold">
-          <button onClick={() => p.onEditChart(Number(p.chartId))} title="Open the query editor / configure" className="group inline-flex items-center gap-1.5 text-slate-800 hover:text-sky-600">
-            <span className="text-slate-400 group-hover:text-sky-400">{currentChart?.number ?? p.chartId} :</span>
-            <span className="group-hover:underline">{p.title}</span>
+        <h1 className="min-w-[9rem] flex-1 text-[15px] font-semibold">
+          <button onClick={() => p.onEditChart(Number(p.chartId))} title={p.title} className="group flex min-w-0 max-w-full items-center gap-1.5 text-slate-800 hover:text-sky-600">
+            <span className="shrink-0 text-slate-400 group-hover:text-sky-400">{currentChart?.number ?? p.chartId} :</span>
+            <span className="truncate group-hover:underline">{p.title}</span>
             <Ic.gear className="text-slate-400 opacity-0 transition-opacity group-hover:opacity-100" />
           </button>
         </h1>
-        {currentChart?.certified && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600" title="Certified chart">✓ Certified</span>}
-        <span className={'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium ' + (p.error ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600')}>
+        {currentChart?.certified && <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600" title="Certified chart">✓ Certified</span>}
+        <span className={'flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium ' + (p.error ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600')}>
           <span className={'h-1.5 w-1.5 rounded-full ' + (p.error ? 'bg-rose-500' : 'bg-emerald-500')} /> {p.loading ? 'Loading…' : p.error ? 'Error' : (p.status || 'Success')}
         </span>
         {p.freshness && <FreshnessChip freshness={p.freshness} />}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           <ComparePicker value={p.compare} onChange={p.onCompareChange} disabled={p.compareDisabled} disabledReason={p.compareDisabledReason} />
           <Dropdown value={p.chartType} onChange={p.onChartTypeChange} options={['Line Chart', 'Bar Chart', 'Area Chart']} icon={<Ic.line />} />
           <Dropdown value={p.granularity} onChange={p.onGranularityChange} options={['Day', 'Week', 'Month']} />
-          <DateRangePicker value={p.dateRange} onChange={(r) => p.onDateRangeChange(r.start, r.end)} align="right" widthClass="w-[256px]" />
+          <DateRangePicker value={p.dateRange} onChange={(r) => p.onDateRangeChange(r.start, r.end)} align="right" widthClass="w-[232px] 2xl:w-[256px]" />
           <Dropdown value={String(p.endOffset)} onChange={(v) => p.onEndOffsetChange(Number(v))} options={['0', '1', '2', '3', '7', '14']} title="Load data up to this many days before today" />
           <ExportMenu onPng={onExportPng} onCsv={onExportCsv} />
-          <button onClick={p.onShare} className="flex items-center gap-1.5 rounded-md bg-sky-500 px-3 py-[7px] text-[13px] font-semibold text-white hover:bg-sky-600" title="Copy a shareable link to this chart"><Ic.link /> Share</button>
+          <button onClick={p.onShare} className="flex items-center gap-1.5 rounded-md bg-sky-500 px-3 py-[7px] text-[13px] font-semibold text-white hover:bg-sky-600" title="Copy a shareable link to this chart"><Ic.link /><span className="hidden 2xl:inline">Share</span></button>
         </div>
       </div>
 

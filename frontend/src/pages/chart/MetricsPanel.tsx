@@ -44,7 +44,7 @@ export function MetricsPanel({ metrics, search, onSearchChange, onToggleMetric, 
   const someVisible = metrics.some((m) => m.visible)
 
   return (
-    <aside className="flex w-[300px] shrink-0 flex-col border-l border-slate-200 bg-white">
+    <aside className="flex w-[264px] shrink-0 flex-col border-l border-slate-200 bg-white 2xl:w-[300px]">
       <div className="flex items-center gap-5 border-b border-slate-200 px-4">
         {tabs.map((t) => (
           <button key={t} onClick={() => onTabChange && onTabChange(t)}
