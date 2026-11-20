@@ -373,3 +373,75 @@ def test_filter_on_independent_dimension_does_not_change_metric(client, duckdb_p
     # But filtering a NON-independent dim (country) MUST still restrict dau.
     assert dau({"country": ["US"]}) == 100
     assert dau({"country": ["UK"]}) == 50
+
+
+# ---------------------------------------------------------------------------------------
+# Batching metrics by grain. serve_data used to run ONE DuckDB query per metric; six metrics
+# on the production ads chart took 11.8s against 0.6s for one, to return 14 KB. Metrics are
+# now grouped by their independent_dimensions set, since that set is the only thing that
+# changes the generated SQL. These pin the two halves of that: batching must not change a
+# value, and metrics at DIFFERENT grains must never share a query.
+# ---------------------------------------------------------------------------------------
+
+def test_batching_by_grain_gives_the_same_values_as_one_metric_at_a_time(client, duckdb_path):
+    """Three grains in one chart. Requesting all five metrics together must give exactly what
+    requesting each alone gives — otherwise the batching has merged grains."""
+    chart_id = _make_chart(
+        client,
+        dims=["source", "country"],
+        metrics_config=[
+            # grain A: independent of both dims
+            {"name": "mau", "column_name": "mau", "independent_dimensions": ["source", "country"]},
+            # grain B: independent of source only
+            {"name": "dau", "column_name": "dau", "independent_dimensions": ["source"]},
+            {"name": "sessions", "column_name": "sessions", "independent_dimensions": ["source"]},
+            # grain C: fully summable
+            {"name": "revenue", "column_name": "revenue"},
+            {"name": "clicks", "column_name": "clicks"},
+        ],
+        name="batch-grain-test",
+    )
+    _seed(
+        duckdb_path, chart_id,
+        [("event_date", "DATE"), ("source", "VARCHAR"), ("country", "VARCHAR"),
+         ("mau", "BIGINT"), ("dau", "BIGINT"), ("sessions", "BIGINT"),
+         ("revenue", "DOUBLE"), ("clicks", "BIGINT")],
+        [
+            (date(2026, 6, 12), "A", "US", 900, 100, 220, 30.0, 7),
+            (date(2026, 6, 12), "B", "US", 900, 100, 220, 40.0, 9),
+            (date(2026, 6, 12), "C", "US", 900, 100, 220, 50.0, 11),
+            (date(2026, 6, 12), "A", "UK", 900, 60, 130, 12.0, 3),
+            (date(2026, 6, 12), "B", "UK", 900, 60, 130, 15.0, 4),
+        ],
+    )
+    names = ["mau", "dau", "sessions", "revenue", "clicks"]
+
+    for group_by in ("", "country", "source", "country&group_by=source"):
+        qs = f"group_by={group_by}"
+        together = client.get(
+            f"/charts/{chart_id}/data?{qs}&" + "&".join(f"metrics={n}" for n in names)
+        ).json()["rows"]
+        alone = {
+            n: client.get(f"/charts/{chart_id}/data?{qs}&metrics={n}").json()["rows"]
+            for n in names
+        }
+        assert len(together) == len(alone["dau"]), f"row count differs for group_by={group_by!r}"
+        for i, row in enumerate(together):
+            for n in names:
+                assert row[n] == pytest.approx(alone[n][i][n]), (
+                    f"{n} differs at row {i} for group_by={group_by!r}: "
+                    f"batched {row[n]} vs alone {alone[n][i][n]}"
+                )
+
+
+def test_batching_refuses_to_mix_two_grains_in_one_query(client, duckdb_path):
+    """The guard that makes the optimisation safe: merging different grains into one GROUP BY
+    is precisely the double count this module exists to prevent, so it must raise rather than
+    quietly produce a number."""
+    from app.models import Metric
+    from app.serving import _run_metric_group
+
+    a = Metric(name="dau", column_name="dau", independent_dimensions=["source"])
+    b = Metric(name="revenue", column_name="revenue", independent_dimensions=[])
+    with pytest.raises(ValueError, match="one shared independent_dimensions set"):
+        _run_metric_group(None, None, None, [a, b], ["source"])

@@ -165,14 +165,50 @@ def _run_metric(
     requested_dims: list[str],
     collapse_time: bool = False,
 ) -> dict[tuple, object]:
-    """Return {(time_bucket, *eff_values): metric_value} for this metric."""
+    """Return {(time_bucket, *eff_values): metric_value} for this metric.
+
+    Thin wrapper over _run_metric_group, kept because a single metric is the clearer thing to
+    read and to test against."""
+    return _run_metric_group(
+        conn, chart, req, [metric], requested_dims, collapse_time=collapse_time
+    )[metric.name]
+
+
+def _run_metric_group(
+    conn,
+    chart: Chart,
+    req: DataRequest,
+    metrics: list,
+    requested_dims: list[str],
+    collapse_time: bool = False,
+) -> dict[str, dict[tuple, object]]:
+    """Return {metric_name: {(time_bucket, *eff_values): value}} for METRICS THAT SHARE A GRAIN.
+
+    Every metric passed here MUST have the same `independent_dimensions`. That is the whole
+    precondition: the grain, the effective dimensions and the WHERE clause are all derived from
+    that set, so metrics sharing it produce byte-identical SQL except for which column is wrapped
+    in MAX(). Running them as one pass instead of N is worth real time — serving six metrics on
+    the ads chart took 11.8s against 0.6s for one, for 14 KB of output, because each metric was a
+    separate full pass over the cache.
+
+    Metrics with DIFFERENT independence sets must NOT be batched: they dedup at different grains,
+    and collapsing them into one GROUP BY is exactly the double-count this module exists to stop.
+    """
+    if not metrics:
+        return {}
+    indep_sets = {tuple(sorted(m.independent_dimensions or [])) for m in metrics}
+    if len(indep_sets) != 1:
+        raise ValueError(
+            "_run_metric_group requires one shared independent_dimensions set, got "
+            f"{sorted(indep_sets)}"
+        )
     table = table_name(chart.id)
     time_col = chart.time_column
     _eff = effective_dimensions(chart, _columns(conn, table))
     dim_by_name = {d.name: d for d in _eff}
     all_chart_dim_names = [d.name for d in _eff]
 
-    indep = set(metric.independent_dimensions or [])
+    indep = set(metrics[0].independent_dimensions or [])
     grain_dim_names = [d for d in all_chart_dim_names if d not in indep]
     grain_cols = [dim_by_name[d].column_name for d in grain_dim_names]
 
@@ -187,11 +223,13 @@ def _run_metric(
     # Independent dims must not filter this metric (see module docstring).
     where, params = _build_where(req, time_col, dim_by_name, exclude_dims=indep)
 
+    # One MAX per metric, positionally aliased so a metric column named like a dimension
+    # cannot collide with one.
+    grain_exprs = [f"MAX({_q(m.column_name)}) AS _grain{i}" for i, m in enumerate(metrics)]
     inner_select = ["_day"] + [_q(c) for c in grain_cols]
     inner_group = ["_day"] + [_q(c) for c in grain_cols]
     inner = (
-        f"SELECT {', '.join(inner_select)}, "
-        f"MAX({_q(metric.column_name)}) AS _grain "
+        f"SELECT {', '.join(inner_select)}, {', '.join(grain_exprs)} "
         f"FROM (SELECT *, {day_expr} AS _day FROM {_q(table)} WHERE {where}) _base "
         f"GROUP BY {', '.join(inner_group)}"
     )
@@ -213,14 +251,21 @@ def _run_metric(
         else [bucket_expr] + [_q(c) for c in eff_cols]
     )
     group_clause = f" GROUP BY {', '.join(group_cols)}" if group_cols else ""
+    value_exprs = [f"SUM(_grain{i}) AS _value{i}" for i in range(len(metrics))]
     sql = (
-        f"SELECT {', '.join(outer_select)}, SUM(_grain) AS _value "
+        f"SELECT {', '.join(outer_select)}, {', '.join(value_exprs)} "
         f"FROM ({inner}) _inner"
         f"{group_clause}"
     )
 
     rows = conn.execute(sql, params).fetchall()
-    return {(r[0], *r[1:-1]): r[-1] for r in rows}
+    n = len(metrics)
+    out: dict[str, dict[tuple, object]] = {m.name: {} for m in metrics}
+    for r in rows:
+        key = (r[0], *r[1:-n])
+        for i, m in enumerate(metrics):
+            out[m.name][key] = r[len(r) - n + i]
+    return out
 
 
 def latest_data_date(chart: Chart):
@@ -240,26 +285,55 @@ def latest_data_date(chart: Chart):
         conn.close()
 
 
-def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
+def dimension_values(chart: Chart, from_date=None, to_date=None, filters: dict | None = None) -> dict:
     """Distinct values per dimension (for filter dropdowns) + the data's date
-    extent (for defaulting the range picker). Read straight from DuckDB."""
+    extent (for defaulting the range picker). Read straight from DuckDB.
+
+    `filters` NARROWS WHICH VALUES ARE OFFERED. Without it the dropdowns list every value in
+    the whole cache, which is wrong as soon as a chart holds several independent populations:
+    the experiment console pins one experiment, and the arm chip was still offering `treatment`,
+    `variant_a` and `varient1` — arms belonging to other experiments entirely, that select
+    nothing. Same for assignment builds.
+
+    A dimension is never filtered BY ITSELF. Narrowing the arm list by the arm already chosen
+    would leave the other arms unreachable, so a viewer who picked one could not get back —
+    the usual cascading-filter trap. Callers are expected to pass only the cuts that are FIXED
+    for the view (the console passes its forced experiment/game/platform), not the viewer's own
+    in-progress selections.
+    """
     table = table_name(chart.id)
     conn = duckdb_conn.get_connection(chart.id, read_only=True)
     try:
         if not _table_exists(conn, table):
             return {"dimensions": {d.name: [] for d in effective_dimensions(chart, set())}, "date_min": None, "date_max": None}
 
-        where, params = "1=1", []
+        dim_by_name = {d.name: d for d in effective_dimensions(chart, _columns(conn, table))}
         tc = chart.time_column
-        if tc and (from_date or to_date):
-            clauses = []
-            if from_date:
+
+        def _scope(exclude_dim: str | None) -> tuple[str, list]:
+            clauses: list[str] = []
+            params: list = []
+            if tc and from_date:
                 clauses.append(f"CAST({_q(tc)} AS DATE) >= ?")
                 params.append(from_date)
-            if to_date:
+            if tc and to_date:
                 clauses.append(f"CAST({_q(tc)} AS DATE) <= ?")
                 params.append(to_date)
-            where = " AND ".join(clauses)
+            for name, values in (filters or {}).items():
+                if name == exclude_dim:
+                    continue
+                dim = dim_by_name.get(name)
+                if dim is None:
+                    continue
+                if not values:
+                    # An explicitly empty selection means "none of this dimension", which
+                    # leaves nothing to offer — not "everything", which is what dropping the
+                    # clause would quietly mean.
+                    clauses.append("1=0")
+                    continue
+                clauses.append(f"{_q(dim.column_name)} IN ({', '.join('?' * len(values))})")
+                params.extend(values)
+            return (" AND ".join(clauses) or "1=1"), params
 
         # Per-dimension value ordering (see Dimension.value_order):
         #  - "metric": descending by the primary base metric's total (biggest first)
@@ -270,7 +344,7 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
             None,
         )
 
-        def _metric_ordered(col: str) -> list | None:
+        def _metric_ordered(col: str, where: str, params: list) -> list | None:
             if order_metric is None:
                 return None
             try:
@@ -285,7 +359,7 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
             except Exception:
                 return None  # bad/missing column type → caller falls back to natural
 
-        def _natural_ordered(col: str) -> list:
+        def _natural_ordered(col: str, where: str, params: list) -> list:
             rows = conn.execute(
                 f"SELECT DISTINCT {_q(col)} AS v FROM {_q(table)} WHERE {where}",
                 params,
@@ -293,15 +367,28 @@ def dimension_values(chart: Chart, from_date=None, to_date=None) -> dict:
             return sorted((r[0] for r in rows if r[0] is not None), key=_natural_key)
 
         dims: dict[str, list] = {}
-        for d in effective_dimensions(chart, _columns(conn, table)):
-            vals = _metric_ordered(d.column_name) if d.value_order == "metric" else None
-            dims[d.name] = vals if vals is not None else _natural_ordered(d.column_name)
+        for d in dim_by_name.values():
+            where, params = _scope(d.name)
+            vals = _metric_ordered(d.column_name, where, params) if d.value_order == "metric" else None
+            dims[d.name] = vals if vals is not None else _natural_ordered(d.column_name, where, params)
 
         date_min = date_max = None
         if tc:
+            # Scoped by the same fixed cuts (minus the date bounds themselves, which are what
+            # this is measuring), so a pinned experiment's picker opens on ITS window rather
+            # than on the extent of every experiment in the cache.
+            extent_clauses, extent_params = [], []
+            for name, values in (filters or {}).items():
+                dim = dim_by_name.get(name)
+                if dim is None or not values:
+                    continue
+                extent_clauses.append(f"{_q(dim.column_name)} IN ({', '.join('?' * len(values))})")
+                extent_params.extend(values)
+            extent_where = " AND ".join(extent_clauses) or "1=1"
             r = conn.execute(
                 f"SELECT MIN(CAST({_q(tc)} AS DATE)), MAX(CAST({_q(tc)} AS DATE)) "
-                f"FROM {_q(table)}"
+                f"FROM {_q(table)} WHERE {extent_where}",
+                extent_params,
             ).fetchone()
             date_min, date_max = (r[0], r[1]) if r else (None, None)
 
@@ -402,11 +489,27 @@ def serve_data(chart: Chart, req: DataRequest) -> dict:
             }
 
         keyset_rows = _run_keyset(conn, chart, req, requested_dims, collapse_time=collapse_time)
-        metric_lookups: dict[str, dict] = {}
+
+        # ONE QUERY PER GRAIN, not per metric. Metrics are grouped by their
+        # independent_dimensions set, because that set is the only thing that changes the SQL —
+        # everything else (the inner MAX grain, the effective dims, the WHERE exclusions) is
+        # derived from it. Six metrics on the ads chart used to mean six full passes over the
+        # cache: 11.8s against 0.6s for one, to return 14 KB. Grouped, that chart needs three
+        # passes, Revenue two, and Session Time one.
+        #
+        # Metrics with DIFFERENT independence sets stay in separate groups on purpose: they
+        # dedup at different grains, and merging them into one GROUP BY is the double-count
+        # this module exists to prevent.
+        by_grain: dict[tuple, list] = {}
         for m_name in needed_base:
-            metric_lookups[m_name] = _run_metric(
-                conn, chart, req, metric_by_name[m_name], requested_dims,
-                collapse_time=collapse_time,
+            m = metric_by_name[m_name]
+            by_grain.setdefault(tuple(sorted(m.independent_dimensions or [])), []).append(m)
+        metric_lookups: dict[str, dict] = {}
+        for group in by_grain.values():
+            metric_lookups.update(
+                _run_metric_group(
+                    conn, chart, req, group, requested_dims, collapse_time=collapse_time
+                )
             )
     finally:
         conn.close()
