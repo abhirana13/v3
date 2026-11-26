@@ -1,0 +1,292 @@
+# Metric monitor — which games are watched, which metrics, how a move becomes an alert.
+# Read by app.monitor.config. Every number here is a decision; the reasoning is in MONITOR.md.
+#
+# A game is configured here but WATCHED only while it passes the gates below (revenue and active UA),
+# which are recomputed every run. Adding a game = a [games.<key>] block; the gates do the rest.
+
+[defaults]
+window_days = 35          # days pulled per run: 28 for the dispersion estimate + 7 for the baseline
+baseline_days = 7         # baseline = median of the 7 days before the day being read
+mad_days = 28             # dispersion = MAD of residuals over the trailing 28 days
+z_threshold = 3.0         # a move is "unusual" when |value - baseline| >= 3 robust-sigma
+persist_sigma = 2.0       # consecutive days beyond this count as the same move
+data_lookback_days = 120  # activity history scanned for install days (age bands); users.created_at covers older installs
+exclude_countries = ["IN"]
+# When a finding is worth a message. SEV1 = act now, SEV2 = look today, SEV3 = watch.
+post_min_severity = 2     # SEV2 and up post the day they appear
+sev3_persist_days = 3     # a SEV3 posts only once it has lasted this many consecutive days
+sev1_repost_daily = true  # an open SEV1 is repeated every day until it recovers
+sev2_repost_every_days = 3
+post_recovery_for_sev1 = true   # one line when a SEV1 metric is back inside 1.5 sigma
+weekly_summary = false    # Monday WoW table of the core metrics even when nothing is wrong
+slack_mention_sev1 = "<!here>"
+slack_mention_sev2 = ""
+
+[defaults.gates]
+# A game is watched only while BOTH hold. Fails => no messages at all for that game.
+min_ad_revenue_per_day_usd = 500   # trailing 7-day mean, all platforms, billed ad revenue
+# Active UA: Adjust cost when the game has an `adjust_app` (mean of the trailing 7 days that have a
+# non-zero cost — the newest day reads 0 until Adjust fills it); otherwise attributed paid installs
+# from attribution.events (every network except organic/unattributed), mean per day over 7 days.
+min_ua_spend_per_day_usd = 100
+min_paid_installs_per_day = 50
+
+[defaults.severity]
+# $ impact per day = what the move costs at yesterday's volume (see severity.py).
+sev1_usd_per_day = 500
+sev1_share_of_platform_revenue = 0.15
+sev2_usd_per_day = 150
+sev2_share_of_platform_revenue = 0.07
+# Hard-break signals are SEV1 whatever the $ (a remote-config / SDK break is cheap to fix and
+# compounds daily): config-class block reasons at >= this many per DAU, from ~0 before.
+hard_break_blocks_per_dau = 0.5
+hard_break_placement_drop = 0.80   # one placement's impressions -80% while others hold
+
+# Ad-type labels differ per game (Nova logs inter/leader). Raw label (lower-cased first field of `p`)
+# -> canonical interstitial / rewarded / banner. A game may add its own under [games.<key>.ad_type_map].
+[defaults.ad_type_map]
+inter = "interstitial"
+it = "interstitial"
+isl = "interstitial"
+interstitial = "interstitial"
+rv = "rewarded"
+rwd = "rewarded"
+reward = "rewarded"
+rewarded = "rewarded"
+ban = "banner"
+banner = "banner"
+leader = "banner"          # leaderboard banner: refresh rows like a banner
+
+# Block reasons that mean "the game asked for an ad and its own config refused": a remote-config
+# or SDK setup problem, never the market. Anything else (MinLevel, cooldown, RemoveAdsPurchased)
+# is a rule working as designed. Same ad wrapper across the games; override per game if needed.
+[defaults.block_reasons]
+config_class = ["TriggerPointNotConfigured", "TriggerPointDisabled", "AdTypeDisabled", "ManagerNotFound", "PlacementNotFound", "NoAdUnit"]
+
+[defaults.intraday]
+# The evening hard-break check (MONITOR.md 5b; intraday.py). Every rule is SEV1 or nothing:
+# a remote-config / placement break shows the same evening, ordinary moves wait for the daily read.
+# Rates are per active player in the window; "usual" = median of the same hours on each of the
+# previous compare_days days.
+enabled = true
+window_hours = 12             # the last 12 complete UTC hours: the evening run (12:45 UTC) reads 00:00–12:00 UTC = 05:30–17:30 IST
+compare_days = 7
+history_days = 8              # hours pulled per run
+arm_days = 14                 # experiment assignment rows looked back for the per-arm cuts
+lag_hours = 0                 # ingestion lag held back (measured ~0 on game 4: the hour lands as it ends)
+cooldown_hours = 12           # the same break signature posts at most once per 12 h
+min_active_players = 200
+thin_hour_ratio = 0.4         # last window hour < 0.4 x its usual players => data incomplete, not read
+blocks_per_player = 0.5       # config-class block reason >= 0.5 per active player ...
+blocked_players_share = 0.10  # ... hitting >= 10% of active players ...
+blocks_base_max_per_player = 0.05   # ... from <= 0.05 per player in the comparison windows
+placement_collapse_ratio = 0.20     # one placement at <= 20% of its usual imps per player ...
+placement_hold_ratio = 0.65         # ... while every other meaningful placement holds >= 65%
+placement_min_rate = 0.3            # "meaningful" = >= 0.3 imps per player usually ...
+placement_min_imps = 100            # ... and >= 100 imps per window
+volume_collapse_ratio = 0.60        # IT or RV imps per player <= 60% of usual ...
+wins_hold_ratio = 0.85              # ... while level wins per player hold >= 85%
+volume_min_imps = 300               # usual imps per window below which the type is not read
+
+# Metrics watched per platform. direction: which way is "wrong". min_rel: the smallest relative
+# move worth a finding even when it is statistically unusual (keeps tiny-but-steady series quiet).
+# family groups the report ("revenue", "ads", "audience", "engagement", "retention", "health", "ua").
+[defaults.metrics.ad_revenue]
+label = "ad revenue"
+unit = "usd"
+direction = "down_is_bad"
+min_rel = 0.08
+family = "revenue"
+
+[defaults.metrics.arpdau]
+label = "ARPDAU"
+unit = "usd"
+direction = "down_is_bad"
+min_rel = 0.08
+family = "revenue"
+
+[defaults.metrics.dau]
+label = "DAU"
+unit = "count"
+direction = "down_is_bad"
+min_rel = 0.12
+family = "audience"
+
+[defaults.metrics.installs]
+label = "new players (first active day)"
+unit = "count"
+direction = "down_is_bad"
+min_rel = 0.25
+family = "audience"
+
+[defaults.metrics.ua_spend]
+label = "UA spend (Adjust)"
+unit = "usd"
+direction = "down_is_bad"
+min_rel = 0.30
+family = "ua"
+read_latest = true        # Adjust fills a day's cost the day after: read the latest filled day
+
+[defaults.metrics.paid_installs]
+label = "paid installs (attributed)"
+unit = "count"
+direction = "down_is_bad"
+min_rel = 0.30
+family = "ua"
+
+[defaults.metrics.it_imps_per_dau]
+label = "IT imps/DAU"
+unit = "rate"
+direction = "down_is_bad"
+min_rel = 0.10
+family = "ads"
+ad_type = "interstitial"
+lever = "volume"
+
+[defaults.metrics.rv_imps_per_dau]
+label = "RV imps/DAU"
+unit = "rate"
+direction = "down_is_bad"
+min_rel = 0.10
+family = "ads"
+ad_type = "rewarded"
+lever = "volume"
+
+[defaults.metrics.banner_imps_per_dau]
+label = "banner imps/DAU"
+unit = "rate"
+direction = "down_is_bad"
+min_rel = 0.15
+family = "ads"
+ad_type = "banner"
+lever = "volume"
+
+[defaults.metrics.it_ecpm]
+label = "IT eCPM"
+unit = "usd"
+direction = "down_is_bad"
+min_rel = 0.10
+family = "ads"
+ad_type = "interstitial"
+lever = "price"
+
+[defaults.metrics.rv_ecpm]
+label = "RV eCPM"
+unit = "usd"
+direction = "down_is_bad"
+min_rel = 0.10
+family = "ads"
+ad_type = "rewarded"
+lever = "price"
+
+[defaults.metrics.banner_ecpm]
+label = "banner eCPM"
+unit = "usd"
+direction = "down_is_bad"
+min_rel = 0.15
+family = "ads"
+ad_type = "banner"
+lever = "price"
+
+[defaults.metrics.blocked_config_per_dau]
+label = "config-class ad blocks/DAU"
+unit = "rate"
+direction = "up_is_bad"
+min_rel = 1.0            # must at least double
+min_abs = 0.1            # and reach 0.1 per DAU
+family = "health"
+
+[defaults.metrics.wins_per_dau]
+label = "level wins/DAU"
+unit = "rate"
+direction = "down_is_bad"
+min_rel = 0.10
+family = "engagement"
+
+[defaults.metrics.starts_per_dau]
+label = "level starts/DAU"
+unit = "rate"
+direction = "down_is_bad"
+min_rel = 0.10
+family = "engagement"
+
+[defaults.metrics.rolling_d1]
+label = "rolling D1 (active again next day)"
+unit = "share"
+direction = "down_is_bad"
+min_rel = 0.08
+family = "retention"
+lag_days = 1             # measured for the day before yesterday: yesterday is its return day
+
+# =============================================================================================
+# Games. game_id = events.game_id; adjust_app = adjust.adjust_performance.app (empty = not in
+# Adjust: the UA gate and UA context then come from in-game attribution). market_control_games
+# empty = every other enabled game (same ad type, same platform, same dates = the market).
+# Names for 14 and 15 were inferred on 2026-11-25 from install volumes against Adjust (Zen
+# Solitaire's and Seek & Find's day-by-day install shape); correct them here if wrong.
+
+[games.arrows]
+enabled = true
+name = "Arrows"
+game_id = 4
+adjust_app = "Arrow Maze"
+market_control_games = []
+slack_webhook_env = "SLACK_MONITOR_WEBHOOK_URL"
+dashboard_url = ""
+
+[games.arrows.platforms]
+1 = "Android"
+2 = "iOS"
+
+# Interstitial placements, so the report can say which one collapsed. Old names map to new.
+[games.arrows.placement_aliases]
+level_win = "level_win_next_button"
+level_restart = "out_of_lives_restart_button"
+
+[games.nova]
+enabled = true
+name = "Nova Solitaire"
+game_id = 1                 # events from build 3.24.0+; older builds do not log, so DAU here is a subset
+adjust_app = "Nova Solitaire"
+market_control_games = []
+slack_webhook_env = "SLACK_MONITOR_WEBHOOK_URL"
+
+[games.nova.platforms]
+1 = "Android"
+2 = "iOS"
+
+[games.sortery]
+enabled = true
+name = "Sortery"
+game_id = 6
+adjust_app = ""             # not in adjust.adjust_performance (Nut Sort is a different game): UA from attribution
+market_control_games = []
+slack_webhook_env = "SLACK_MONITOR_WEBHOOK_URL"
+
+[games.sortery.platforms]
+1 = "Android"
+2 = "iOS"
+
+[games.zen]
+enabled = true
+name = "Zen Solitaire"
+game_id = 14                # inferred mapping — see note above
+adjust_app = "Zen Solitaire"
+market_control_games = []
+slack_webhook_env = "SLACK_MONITOR_WEBHOOK_URL"
+
+[games.zen.platforms]
+1 = "Android"
+2 = "iOS"
+
+[games.seekfind]
+enabled = true
+name = "Seek & Find"
+game_id = 15                # inferred mapping — see note above
+adjust_app = "Seek & Find"
+market_control_games = []
+slack_webhook_env = "SLACK_MONITOR_WEBHOOK_URL"
+
+[games.seekfind.platforms]
+1 = "Android"
+2 = "iOS"
