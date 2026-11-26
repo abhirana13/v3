@@ -44,6 +44,65 @@ DERIVED_DIMENSIONS: list[DerivedDim] = [
         },
         default="Tier-2",
     ),
+    DerivedDim(
+        name="game",
+        source_column="game_id",
+        # Readable labels beside the raw id, which is all every chart could show before.
+        # EVERY id gets its own bucket, including ones whose name we do not have: a shared
+        # default would collapse six different games into one label and silently merge their
+        # numbers, which is worse than showing a bare id.
+        #
+        # Names supplied by the user from the product list on 2026-11-26. 7, 16 and 17 were
+        # not on that list and keep a "Game <id>" placeholder rather than a name nobody
+        # confirmed; 17 does carry live traffic (230k events since 2026-11-17), so it is worth
+        # naming when someone knows it. An id that is not listed at all falls to "Other", which
+        # is visible rather than silently merged into a real game.
+        buckets={
+            "Nova Solitaire": [1],
+            "Nut Sort":       [2],
+            "Baggage Rush":   [3],
+            "Arrow Maze":     [4],
+            "Cloud World":    [5],
+            "Sortery":        [6],   # "Category Sort" on the product list; every read,
+                                     # build read and note in this project calls it Sortery
+            "Game 7":         [7],
+            "WoofDoku":       [8],
+            "DuelMaster":     [9],
+            "LineTap":        [10],
+            "WoofDoku-In":    [11],
+            "RoadConnect":    [12],
+            "Cloud World-In": [13],
+            "Zen Solitaire":  [14],
+            "Seek & Find":    [15],
+            "Game 16":        [16],
+            "Game 17":        [17],
+        },
+        default="Other",
+    ),
+    DerivedDim(
+        name="platform_name",
+        source_column="platform",
+        # The mapping is the production Ad Revenue query's own, not a guess: it encodes
+        # android->1, ios->2, tiktok_android->3, tiktok_ios->4.
+        #
+        # 3 and 4 are kept even though they are 0.04% of rows (1.2M of 2.85B over 90 days).
+        # Folding them into "Other" would hide a real, if tiny, TikTok population; folding
+        # them into Android/iOS would overstate those.
+        # BOTH SHAPES, because the column genuinely holds both. The production charts encode
+        # platform as the integers the Ad Revenue query defines (android->1, ios->2); the
+        # experiment charts carry the raw strings straight from the event. Listing both means
+        # neither silently falls through to "Unknown" - which is exactly what the first
+        # version of this did to every experiment-chart row.
+        buckets={
+            "Android": [1, "android"],
+            "iOS":     [2, "ios"],
+        },
+        # 3 and 4 (tiktok_android / tiktok_ios) are deliberately NOT mapped and fall here:
+        # 1.2M rows over 90 days, 0.04% of the table. They stay visible as "Unknown" rather
+        # than being folded into Android/iOS, which would overstate those by a real if tiny
+        # amount.
+        default="Unknown",
+    ),
 ]
 
 DERIVED_NAMES = {d.name for d in DERIVED_DIMENSIONS}
@@ -63,7 +122,12 @@ def case_sql(d: DerivedDim) -> str:
     the same way here, so the lists above can be written in whatever case reads best.
     """
     lit = lambda v: "'" + str(v).replace("'", "''") + "'"
-    col = f"UPPER(TRIM({_q(d.source_column)}))"
+    # CAST FIRST. TRIM is VARCHAR-only in DuckDB, so a numeric source column (game_id,
+    # platform) raises "No function matches trim(BIGINT)" — and materialize_derived runs
+    # inside the SUCCESS branch of a backpop, so that exception would mark an otherwise
+    # perfectly good run failed, on every chart, every night. Casting is a no-op for the
+    # VARCHAR columns this started with.
+    col = f"UPPER(TRIM(CAST({_q(d.source_column)} AS VARCHAR)))"
     whens = " ".join(
         f"WHEN {col} IN ({', '.join(lit(str(v).strip().upper()) for v in vals)}) THEN {lit(bucket)}"
         for bucket, vals in d.buckets.items()
