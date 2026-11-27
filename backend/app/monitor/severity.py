@@ -34,7 +34,7 @@ class Scored:
 
 
 def _base(ctx: Ctx, key: str, p, day: int) -> float | None:
-    vals = [ctx.s.get(key, p, d) for d in ctx.base_days(day)]
+    vals = [ctx.s.get(key, p, d) for d in ctx.base_days(day, p)]
     vals = [v for v in vals if v is not None]
     return median(vals) if vals else None
 

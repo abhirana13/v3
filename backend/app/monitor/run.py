@@ -271,6 +271,8 @@ def run_game(cfg: GameCfg, day: date, dry_run: bool = False, cache_dir: Path | N
             "dau": {p: s.get("dau", p, d) for p in s.platforms},
             "frontier": _frontier_text(ctx, s.platforms, d),
             "intraday": _intraday_notes(state, day),
+            # broken days the baselines stepped over (shown so a "vs 7d" figure can be read right)
+            "baseline_skips": {p: sorted(t for t in s.dead_days(p) if d - 2 * cfg.baseline_days <= t < d) for p in s.platforms},
         }
         if post:
             res.payload = report.build_message(cfg, day, post, recoveries, footer)

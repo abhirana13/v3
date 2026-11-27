@@ -59,9 +59,14 @@ class Ctx:
         self._adjust = adjust_by_day(cuts)
 
     # --- windows -------------------------------------------------------------------------------
-    def base_days(self, day: int | None = None) -> list[int]:
+    def base_days(self, day: int | None = None, p=None) -> list[int]:
+        """The baseline_days days before `day`, stepping over days `p` was running broken (all
+        platforms' broken days when p is None) and reaching one further back for each."""
+        from app.monitor.detect import window_days
         d = self.day if day is None else day
-        return [t for t in range(d - self.cfg.baseline_days, d) if t in self.s.days]
+        skip = self.s.dead_days(p if p is not None else "all")
+        used, _ = window_days({t: 1 for t in self.s.days}, d, self.cfg.baseline_days, skip)
+        return sorted(used)
 
     def pname(self, p) -> str:
         return self.cfg.platform_name(p)
@@ -78,7 +83,7 @@ class Ctx:
         return self.s.get("dau", p, day) or 0.0
 
     def dau_base(self, p) -> float:
-        bd = self.base_days()
+        bd = self.base_days(None, p)
         return sum(self.dau(p, d) for d in bd) / len(bd) if bd else 0.0
 
     def dau_by(self, p, col: str, days: list[int]) -> dict:
@@ -120,7 +125,7 @@ class Ctx:
         """The config-class reason with the largest rise per DAU vs the baseline window:
         (reason, per_dau_now, per_dau_base). Chronic reasons (ManagerNotFound sits at ~2-3/DAU on
         both platforms) do not win unless they rose."""
-        base = self.base_days(day)
+        base = self.base_days(day, p)
         dau_now, dau_b = self.dau(p, day), self.dau_base(p)
         now = self.blocks(p, [day])
         bse = self.blocks(p, base)
@@ -155,7 +160,7 @@ class Ctx:
 
     def healthy_base_days(self, p, day: int | None = None, reason: str | None = None) -> list[int]:
         """Baseline days before the blocks began; the plain baseline when there were none."""
-        base = self.base_days(day)
+        base = self.base_days(day, p)
         fb = self.first_block_day(p, reason)
         if fb is None:
             return base
@@ -183,6 +188,14 @@ class Ctx:
     def exp_players(self, p, days: list[int], kind: str = "experiment") -> dict[tuple, float]:
         g = group_sum(self._rows("exp_cut", p, days, lambda r: r.get("kind") == kind), ("exp_key", "arm"), ("players",))
         return {k: v["players"] / max(1, len(days)) for k, v in g.items()}
+
+    def exp_first_day(self, p, key: str) -> int | None:
+        """First day in the window the key's assignment rows reached 5% of that day's DAU."""
+        for d in self.s.days:
+            players = sum(v for (k, a), v in self.exp_players(p, [d]).items() if k == key)
+            if players and players >= 0.05 * (self.dau(p, d) or 1.0):
+                return d
+        return None
 
     def play(self, p, days: list[int]) -> dict[str, float]:
         g = group_sum(self._rows("play_cut", p, days), (), ("starts", "wins"))
@@ -270,7 +283,7 @@ def check_pipeline(ctx: Ctx, p, day: int) -> Diagnosis | None:
                          [f"last hour with impressions: {last:02d}:00 UTC; {24 - last - 1} hours missing"],
                          fix="Re-run once ingestion catches up; today's run read a partial day.")
     # a tail that is far thinner than usual (ingestion lag) — compare the last 3 hours' share
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     if base:
         tail_now = sum(v for h, v in ctx.hour_imps(p, day).items() if h >= 21)
         tot_now = sum(ctx.hour_imps(p, day).values()) or 1.0
@@ -458,7 +471,7 @@ def _placement_collapse(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis 
 
 def _engagement_follows(ctx: Ctx, p, day: int, rel_metric: float) -> tuple[Diagnosis | None, str]:
     wins = ctx.s.get("wins_per_dau", p, day)
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     wins_b = median([ctx.s.get("wins_per_dau", p, d) for d in base if ctx.s.get("wins_per_dau", p, d) is not None] or [0])
     starts = ctx.s.get("starts_per_dau", p, day)
     starts_b = median([ctx.s.get("starts_per_dau", p, d) for d in base if ctx.s.get("starts_per_dau", p, d) is not None] or [0])
@@ -474,7 +487,7 @@ def _engagement_follows(ctx: Ctx, p, day: int, rel_metric: float) -> tuple[Diagn
 def _fill(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | None, str]:
     """Networks, not the game: requests per DAU held while loads per DAU fell, or shows stopped being
     billed. Ratios on raw request / load_fail rows are not used (retry logging swings them)."""
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     f_now, f_base = ctx.funnel(p, ad_type, [day]), ctx.funnel(p, ad_type, base)
     nb = len(base) or 1
     dau_now, dau_b = ctx.dau(p, day), ctx.dau_base(p)
@@ -512,13 +525,13 @@ def _rv_cross_check(ctx: Ctx, p, day: int, ad_type: str) -> tuple[None, str]:
     other = "rewarded" if ad_type == "interstitial" else "interstitial"
     key = f"{SHORT[other]}_imps_per_dau"
     v = ctx.s.get(key, p, day)
-    b = median([ctx.s.get(key, p, d) for d in ctx.base_days(day) if ctx.s.get(key, p, d) is not None] or [0])
+    b = median([ctx.s.get(key, p, d) for d in ctx.base_days(day, p) if ctx.s.get(key, p, d) is not None] or [0])
     r = (v - b) / b if (v is not None and b) else None
     return None, f"{'rewarded' if other == 'rewarded' else 'interstitials'} ({SHORT[other].upper()}/DAU {fmt.num(b)} → {fmt.num(v)}, {fmt.arrow_pct(r)})"
 
 
 def _mix(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | None, str]:
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     w_now, r_now = _band_rates(ctx, p, ad_type, "age", [day])
     w_b, r_b = _band_rates(ctx, p, ad_type, "age", base)
     total, mix, within = kitagawa(w_now, w_b, r_now, r_b)
@@ -532,8 +545,36 @@ def _mix(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | None, str]:
     return None, f"audience mix (D0 share {fmt.pct(d0_b, False)} → {fmt.pct(d0_now, False)}; age bands {band_txt})"
 
 
+def arm_gap(ctx: Ctx, p, key: str, day: int, ad_type: str | None, metric_key: str):
+    """The arms of `key` compared on the metric that moved, on the read day: (label, [(arm, before,
+    now)], relative gap between the highest and lowest arm). None when this metric has no per-arm
+    cut (retention, audience, banner, eCPM) — the gap is then not knowable from the pull."""
+    base = ctx.base_days(day, p)
+    ad_now, ad_base = ctx.arm_dau(p, key, [day]), ctx.arm_dau(p, key, base)
+    if ad_type in ("interstitial", "rewarded") and metric_key.endswith("imps_per_dau"):
+        label = f"{SHORT[ad_type].upper()} imps/DAU"
+        num_now = {a: v["imps"] for a, v in ctx.arm_imps(p, key, ad_type, [day]).items()}
+        num_base = {a: v["imps"] for a, v in ctx.arm_imps(p, key, ad_type, base).items()}
+    elif metric_key in ("wins_per_dau", "starts_per_dau"):
+        label = "level wins/DAU"
+        num_now, num_base = ctx.arm_wins(p, key, [day]), ctx.arm_wins(p, key, base)
+    else:
+        return None
+    rows = []
+    for a, dn in ad_now.items():
+        if dn < 100:
+            continue
+        rows.append((a, safe_div(num_base.get(a, 0.0), ad_base.get(a, 0.0)), num_now.get(a, 0.0) / dn))
+    if len(rows) < 2:
+        return None
+    lo, hi = min(r[2] for r in rows), max(r[2] for r in rows)
+    return label, sorted(rows), ((hi - lo) / hi if hi else 0.0)
+
+
 def _experiment_change(ctx: Ctx, p, day: int, ad_type: str | None, metric_key: str) -> tuple[Diagnosis | None, str]:
-    """A key whose daily assigned players jumped in the last 3 days (start / ramp), with an arm gap."""
+    """A key whose daily assigned players jumped in the last 3 days (start / ramp). It is named as the
+    cause only when its arms differ by >= 25% on the metric that moved; arms in line clear it; a
+    metric with no per-arm cut leaves it as 'possible', said as such."""
     recent = [d for d in (day - 2, day - 1, day) if d in ctx.s.days]
     earlier = [d for d in range(day - 9, day - 2) if d in ctx.s.days]
     now = ctx.exp_players(p, recent)
@@ -554,27 +595,28 @@ def _experiment_change(ctx: Ctx, p, day: int, ad_type: str | None, metric_key: s
         return None, "no experiment change in 3 days"
     changed.sort(key=lambda r: -(r[2] - r[1]))
     k, vb, v = changed[0]
-    ev = [f"`{k}`: {fmt.num(vb)} → {fmt.num(v)} assigned players/day" + (" (new on this platform)" if vb == 0 else " (ramp)")]
-    conf = "possible"
-    if ad_type and ad_type != "banner":
-        base = ctx.base_days(day)
-        ai, ad = ctx.arm_imps(p, k, ad_type, [day]), ctx.arm_dau(p, k, [day])
-        aib, adb = ctx.arm_imps(p, k, ad_type, base), ctx.arm_dau(p, k, base)
-        rates = {a: safe_div(ai.get(a, {}).get("imps", 0.0), ad.get(a, 0.0)) for a in ad}
-        rates_b = {a: safe_div(aib.get(a, {}).get("imps", 0.0), adb.get(a, 0.0)) for a in adb}
-        vals = [(a, r) for a, r in rates.items() if r is not None and ad.get(a, 0) >= 100]
-        if len(vals) >= 2:
-            lo, hi = min(vals, key=lambda t: t[1]), max(vals, key=lambda t: t[1])
-            if hi[1] and (hi[1] - lo[1]) / hi[1] >= 0.25:
-                ev.append(f"{SHORT[ad_type].upper()} imps/DAU by arm: " + "; ".join(
-                    f"{_pretty_arm(a)} {fmt.num(rates_b.get(a))} → {fmt.num(r)}" for a, r in sorted(vals)))
-                conf = "likely"
-    return Diagnosis("experiment_change", conf, f"{ctx.pname(p)}: `{k}` started or ramped in the last 3 days and its arms differ",
-                     ev, [], f"Check `{k}`'s configuration and whether the arm gap is intended.", tags={"exp_key": k}), ""
+    first = ctx.exp_first_day(p, k)
+    since = f", assigning since {_dname(first)}" if first is not None else ""
+    ev = [f"`{k}`: {fmt.num(vb)} → {fmt.num(v)} assigned players/day" + (f" (new on this platform{since})" if vb == 0 else f" (ramp{since})")]
+    gap = arm_gap(ctx, p, k, day, ad_type, metric_key)
+    if gap is None:
+        return Diagnosis("experiment_change", "possible",
+                         f"{ctx.pname(p)}: `{k}` started or ramped in the last 3 days — its arms cannot be compared on this metric",
+                         ev, [], f"Read `{k}` by arm before blaming it.", tags={"exp_key": k},
+                         summary=f"`{k}` started or ramped on {ctx.pname(p)} in the last 3 days; whether it caused this is not yet known"), ""
+    label, rows, rel = gap
+    arm_txt = f"{label} by arm: " + "; ".join(
+        f"{_pretty_arm(a)} {fmt.num(b)} → {fmt.num(n)}" if b is not None else f"{_pretty_arm(a)} {fmt.num(n)}" for a, b, n in rows)
+    if rel < 0.25:
+        return None, f"`{k}` (started/ramped, but its arms are in line: {arm_txt})"
+    ev.append(arm_txt)
+    return Diagnosis("experiment_change", "likely", f"{ctx.pname(p)}: `{k}` started or ramped in the last 3 days and its arms differ by {fmt.pct(rel, False)}",
+                     ev, [], f"Check `{k}`'s configuration and whether the arm gap is intended.", tags={"exp_key": k},
+                     summary=f"`{k}` started or ramped on {ctx.pname(p)} and its arms differ by {fmt.pct(rel, False)} on {label}"), ""
 
 
 def _build_rollout(ctx: Ctx, p, day: int, ad_type: str | None) -> tuple[Diagnosis | None, str]:
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     sh_now = _shares(ctx.dau_by(p, "app_version", [day]))
     sh_b = _shares(ctx.dau_by(p, "app_version", base))
     new = [(v, sh_now[v], sh_b.get(v, 0.0)) for v in sh_now if sh_now[v] >= 0.15 and sh_now[v] - sh_b.get(v, 0.0) >= 0.10]
@@ -604,7 +646,7 @@ def _build_rollout(ctx: Ctx, p, day: int, ad_type: str | None) -> tuple[Diagnosi
 
 
 def _network_price(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | None, str]:
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     nb = len(base) or 1
     now, bse = ctx.imps_by(p, ad_type, "network", [day]), ctx.imps_by(p, ad_type, "network", base)
     rows = []
@@ -632,7 +674,7 @@ def _network_price(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | Non
 
 
 def _market_price(ctx: Ctx, p, day: int, ad_type: str, rel_ours: float) -> tuple[Diagnosis | None, str]:
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     m_now, m_b = ctx.market_ecpm(p, ad_type, [day]), ctx.market_ecpm(p, ad_type, base)
     if m_now is None or not m_b:
         return None, "no market control (games %s) data" % ",".join(map(str, ctx.cfg.market_control_games))
@@ -646,7 +688,7 @@ def _market_price(ctx: Ctx, p, day: int, ad_type: str, rel_ours: float) -> tuple
 
 def _ecpm_mix(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | None, str]:
     """eCPM at a fixed age x geo mix: if the within-band price held, the move is mix."""
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     if ad_type == "banner":
         return None, ""
 
@@ -665,7 +707,9 @@ def _ecpm_mix(ctx: Ctx, p, day: int, ad_type: str) -> tuple[Diagnosis | None, st
     total, mix, within = kitagawa(w_now, w_b, e_now, e_b)
     if total < 0 and abs(mix) >= 0.6 * abs(total):
         return Diagnosis("ua_mix", "likely", f"{ctx.pname(p)}: {ad_type} eCPM fell because the impression mix shifted to cheaper players, not because prices fell",
-                         [f"mix explains {fmt.pct(mix / total, False)} of the move at fixed age × geo; within-cell price {fmt.arrow_pct(within / (sum(w_b.get(k, 0) * e_b.get(k, 0) for k in e_b) or 1))}"],
+                         [(f"all of the fall is the player mix at fixed age × geo" if mix / total >= 1 else
+                           f"mix explains {fmt.pct(mix / total, False)} of the fall at fixed age × geo")
+                          + f"; within each cell prices moved {fmt.arrow_pct(within / (sum(w_b.get(k, 0) * e_b.get(k, 0) for k in e_b) or 1))}"],
                          [], None), ""
     return None, f"mix at fixed age×geo (explains {fmt.pct(abs(mix) / abs(total), False) if total else 'n/a'})"
 
@@ -729,7 +773,7 @@ def diagnose(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
         if at == "banner":
             # banners pause while a full-screen ad is open: more interstitials => fewer banner rows
             it = ctx.s.get("it_imps_per_dau", p, day)
-            it_b = median([ctx.s.get("it_imps_per_dau", p, d) for d in ctx.base_days(day) if ctx.s.get("it_imps_per_dau", p, d) is not None] or [0])
+            it_b = median([ctx.s.get("it_imps_per_dau", p, d) for d in ctx.base_days(day, p) if ctx.s.get("it_imps_per_dau", p, d) is not None] or [0])
             if it and it_b and it > 1.08 * it_b:
                 return Diagnosis("engagement", "likely", f"{ctx.pname(p)}: banner impressions fell because interstitials rose (banners pause under full-screen ads)",
                                  [f"IT imps/DAU {fmt.num(it_b)} → {fmt.num(it)}"], ruled)
@@ -782,7 +826,7 @@ def diagnose(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
 
 def revenue_decomposition(ctx: Ctx, p, day: int) -> list[tuple[str, str, float]]:
     """[(ad_type, 'volume'|'price'|'dau', $ change vs baseline)] — the $ the move cost per lever."""
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     nb = len(base) or 1
     out = []
     dau_now, dau_b = ctx.dau(p, day), ctx.dau_base(p)
@@ -870,13 +914,23 @@ def _revenue(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
     total = sum(x[2] for x in parts)
     if total >= 0:
         return Diagnosis("unexplained", "unexplained", f"{ctx.pname(p)} {spec.label} moved", [], [])
-    neg = sorted([x for x in parts if x[2] < 0], key=lambda x: x[2])
-    t, lever, d_usd = neg[0]
-    share = d_usd / total
+    # the loss by lever summed across ad types; the dominant lever gets its own diagnosis
+    lever_tot: dict[str, float] = {}
+    for _t, lv, usd in parts:
+        lever_tot[lv] = lever_tot.get(lv, 0.0) + usd
+    neg_levers = sorted([(lv, v) for lv, v in lever_tot.items() if v < 0], key=lambda x: x[1])
+    lever = neg_levers[0][0]
+
+    def top_type(lv: str) -> str:
+        cells = sorted([x for x in parts if x[1] == lv and x[2] < 0], key=lambda x: x[2])
+        return cells[0][0] if cells else "interstitial"
+
+    t = top_type(lever)
+    names = {"dau": "fewer players", "price": "lower ad prices", "volume": "fewer ads per player"}
+    split = ", ".join(f"{names[lv]}{'' if lv == 'dau' else ' (mostly ' + SHORT[top_type(lv)].upper() + ')'} "
+                      f"{fmt.usd(v)} ({fmt.pct(v / total, False)})" for lv, v in neg_levers)
+    ev = [f"Split of the loss: {split}"]
     lever_txt = {"volume": f"{SHORT[t].upper()} impressions per DAU", "price": f"{SHORT[t].upper()} eCPM", "dau": "DAU"}[lever]
-    others = [f"{SHORT[x[0]].upper()} {x[1]} {fmt.usd(x[2])}" for x in neg[1:3]]
-    ev = [f"{fmt.pct(share, False)} of the {fmt.usd(total)}/day is {lever_txt}" + (f" (then {', '.join(others)})" if others else "")]
-    # hand the dominant lever to its own rule set
     if lever == "dau":
         sub = _audience(ctx, Reading("dau", p, day, ctx.dau(p, day), ctx.dau_base(p), None, None,
                                      (ctx.dau(p, day) - ctx.dau_base(p)) / (ctx.dau_base(p) or 1), None, None, None, 0, True, "down"),
@@ -887,31 +941,52 @@ def _revenue(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
         if sub_spec is None:
             sub_spec = MetricSpec(key, lever_txt, "rate", "down_is_bad", 0.0, "ads", ad_type=t, lever=lever)
         v = ctx.s.get(key, p, day)
-        vb = median([ctx.s.get(key, p, d) for d in ctx.base_days(day) if ctx.s.get(key, p, d) is not None] or [0])
+        vb = median([ctx.s.get(key, p, d) for d in ctx.base_days(day, p) if ctx.s.get(key, p, d) is not None] or [0])
         sub = diagnose(ctx, Reading(key, p, day, v, vb, None, None, (v - vb) / vb if (v is not None and vb) else 0.0,
                                     None, None, None, 0, True, "down"), sub_spec)
     u = ua_context(ctx, p, day)
     cut = ua_cut(u)
     ua_line = ua_text(u)
-    if cut and sub.cause in ("ua_mix", "ua_cut", "retention", "unexplained"):
-        # the money followed the spend: fewer new players (who play and pay the most per day)
-        head = f"{ctx.pname(p)}: UA spend was cut ({fmt.arrow_pct(u.get('rel_ua_spend') if u.get('rel_ua_spend') is not None else u.get('rel_paid_installs'))}) — fewer new players, so {lever_txt} fell"
-        summary = (f"UA spend on {ctx.pname(p)} was cut — fewer new players, so {lever_txt} fell. "
-                   f"A UA decision, not a game problem")
-        out = Diagnosis("ua_cut", "likely", head, [ua_line] + sub.evidence + ev, sub.ruled_out, "Confirm the spend change with UA; nothing to fix in the game.",
-                        False, dict(sub.tags, lever=lever, ad_type=t), summary=summary)
+
+    def uniq(xs: list[str]) -> list[str]:
+        seen, out = set(), []
+        for x in xs:
+            if x and x not in seen:
+                seen.add(x)
+                out.append(x)
         return out
+
+    if cut and sub.cause in ("ua_mix", "ua_cut", "retention", "unexplained"):
+        # the money followed the spend. If prices fell too, say whether that is the same cause (fewer
+        # new players, who command the highest prices) or the market, checked at a fixed age x geo mix.
+        rel_sp = u.get("rel_ua_spend") if u.get("rel_ua_spend") is not None else u.get("rel_paid_installs")
+        price_v = lever_tot.get("price", 0.0)
+        extra, also = [], ""
+        if price_v < 0 and abs(price_v) >= 0.25 * abs(total):
+            pt = top_type("price")
+            d_mix, note = _ecpm_mix(ctx, p, day, pt)
+            if d_mix:
+                extra = [f"{SHORT[pt].upper()} prices: " + e for e in d_mix.evidence]
+                also = " and a cheaper player mix (new players earn the most per ad)"
+            else:
+                extra = [f"{SHORT[pt].upper()} prices fell within age × geo cells too — the market, not the mix" + (f" ({note})" if note else "")]
+                also = ", while ad prices also fell across the market"
+        head = f"{ctx.pname(p)}: UA spend was cut ({fmt.arrow_pct(rel_sp)}) — fewer new players{also}"
+        summary = (f"UA spend on {ctx.pname(p)} was cut ({fmt.arrow_pct(rel_sp)}) — fewer new players{also}, "
+                   f"so ad revenue fell. A UA decision, not a game problem")
+        return Diagnosis("ua_cut", "likely", head, uniq([ua_line] + ev + sub.evidence + extra), sub.ruled_out,
+                         "Confirm the spend change with UA; nothing to fix in the game.",
+                         False, dict(sub.tags, lever=lever, ad_type=t), summary=summary)
     ruled = list(sub.ruled_out)
     if ua_line and not cut:
         ruled.append(ua_line.replace("UA: ", "UA steady (") + ")" if "no spend data" not in ua_line else ua_line)
-    out = Diagnosis(sub.cause, sub.confidence, sub.headline, sub.evidence + ev, ruled, sub.fix, sub.hard_break,
-                    dict(sub.tags, lever=lever, ad_type=t), summary=sub.summary)
-    return out
+    return Diagnosis(sub.cause, sub.confidence, sub.headline, uniq(sub.evidence + ev), uniq(ruled), sub.fix, sub.hard_break,
+                     dict(sub.tags, lever=lever, ad_type=t), summary=sub.summary)
 
 
 def _audience(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
     p, day = r.platform, r.day
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     ruled = []
     inst_now = ctx.s.get("installs", p, day) or 0.0
     inst_b = median([ctx.s.get("installs", p, d) or 0.0 for d in base] or [0])
@@ -958,7 +1033,7 @@ def _audience(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
 
 def _engagement(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
     p, day = r.platform, r.day
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     ruled = []
     col = "wins" if spec.key == "wins_per_dau" else "starts"
     # age-mix Kitagawa on play per DAU
@@ -998,7 +1073,7 @@ def _engagement(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
 
 def _retention(ctx: Ctx, r: Reading, spec: MetricSpec) -> Diagnosis:
     p, day = r.platform, r.day
-    base = ctx.base_days(day)
+    base = ctx.base_days(day, p)
     ruled = []
     sh_now, sh_b = _shares(ctx.dau_by(p, "age", [day])), _shares(ctx.dau_by(p, "age", base))
     d0_now, d0_b = sh_now.get("D0", 0.0), sh_b.get("D0", 0.0)

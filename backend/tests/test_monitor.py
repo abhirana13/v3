@@ -66,7 +66,7 @@ def make_cuts(break_days: tuple[int, ...] = (D_END - 1, D_END), break_platform: 
             cuts["rolling_cut"].append({"platform": p, "day": d, "dau": dau_d, "d1_returned": int(dau_d * 0.60 * (1 + rnd.uniform(-0.02, 0.02)))})
             # interstitials: level_win placement 65%, out-of-lives 35%; the break kills the win placement for the variant
             it_total = it_per_dau[p] * dau_d * noise
-            win_share = 0.65
+            win_share = 0.75   # Nov 22 iOS variant: level_win 18,869 of ~25,600 interstitials
             for arm, share in (("control", 1 - var_share), ("variant_a", var_share)):
                 if share == 0:
                     continue
@@ -229,7 +229,7 @@ def test_revenue_finding_adopts_the_volume_lever(world):
     rev = next(sc for sc in scored if sc.spec.key == "ad_revenue" and sc.reading.platform == 2)
     assert rev.diagnosis.cause == "config_break"
     assert rev.diagnosis.tags.get("lever") == "volume" and rev.diagnosis.tags.get("ad_type") == "interstitial"
-    assert any("IT impressions per DAU" in e for e in rev.diagnosis.evidence)
+    assert any("fewer ads per player (mostly IT)" in e for e in rev.diagnosis.evidence)
 
 
 def test_severity_is_sev1_with_a_dollar_figure(world):
@@ -465,3 +465,75 @@ def test_cache_pruning_keeps_recent_days(tmp_path):
     (tmp_path / "notes").mkdir()
     assert prune_cache(tmp_path, keep_days=14, log=lambda m: None) == 2
     assert not old.exists() and not intra_old.exists() and recent.exists() and (tmp_path / "notes").exists()
+
+
+# --- broken days stay out of baselines ------------------------------------------------------------
+
+def test_dead_days_come_from_config_block_spikes_not_chronic_reasons(cfg):
+    broken = (D_END - 4, D_END - 3, D_END - 2, D_END - 1)
+    cuts = make_cuts(break_days=broken)
+    # a chronic config-class reason (ManagerNotFound sits at ~2-3/DAU on both platforms) never counts
+    for d in DAYS:
+        for p, dau in ((1, 5700), (2, 7500)):
+            cuts["blocked_cut"].append({"platform": p, "day": d, "ad_type": "interstitial",
+                                        "reason": "ManagerNotFound", "n": int(dau * 2.5), "players": 300})
+    s = build(cuts, cfg)
+    assert s.dead_days(2) == frozenset(broken)
+    assert s.dead_days(1) == frozenset()
+    assert D_END not in s.dead_days(2)            # the fix day itself is healthy again
+    assert s.dead[2][D_END - 2] == "TriggerPointNotConfigured"
+
+
+def test_baseline_steps_over_dead_days():
+    """Four broken days when players saw no ads and won 30% more levels, then a fix and a modest real
+    dip (-8%). Against healthy days the dip is under the 10% bar; against a baseline full of broken
+    days it would read as a -29% collapse — the false alarm of Nov 26."""
+    cfgw = mcfg.load()["arrows"]
+    spec = cfgw.metrics["wins_per_dau"]
+    rnd = random.Random(5)
+    series = {d: 8.4 * (1 + rnd.uniform(-0.03, 0.03)) for d in DAYS}
+    broken = {D_END - 4, D_END - 3, D_END - 2, D_END - 1}
+    for d in broken:
+        series[d] = 8.4 * 1.30
+    series[D_END] = 8.4 * 0.92
+    healthy = detect.read_metric(series, spec, 2, D_END, cfgw, frozenset(broken))
+    assert healthy.skipped == tuple(sorted(broken))
+    assert abs(healthy.baseline - 8.4) < 0.3
+    assert not healthy.flagged
+    naive = detect.read_metric(series, spec, 2, D_END, cfgw)
+    assert naive.flagged and naive.rel_base < -0.25
+
+
+def test_diagnosis_windows_skip_dead_days(cfg):
+    cuts = make_cuts(break_days=(D_END - 3, D_END - 2, D_END - 1))
+    s = build(cuts, cfg)
+    ctx = Ctx(cuts, s, cfg, D_END)
+    ios = ctx.base_days(D_END, 2)
+    assert len(ios) == 7 and not set(ios) & {D_END - 3, D_END - 2, D_END - 1} and min(ios) == D_END - 10
+    assert ctx.base_days(D_END, 1) == list(range(D_END - 7, D_END))   # Android was never broken
+
+
+def test_footer_names_the_skipped_days(world, cfg):
+    *_, scored = world
+    payload = report.build_message(cfg, END, scored, [], {"baseline_skips": {1: [], 2: [D_END - 2, D_END - 1]}})
+    assert "baselines skip iOS Nov 22–23" in report.to_text(payload)
+
+
+# --- an experiment is blamed only when its arms differ ---------------------------------------------
+
+def test_experiment_change_needs_a_measured_arm_gap(cfg):
+    from app.monitor.diagnose import _experiment_change
+    cuts = make_cuts()                                  # interstitial_placement starts on D_END - 1, arms play alike
+    s = build(cuts, cfg)
+    d, note = _experiment_change(Ctx(cuts, s, cfg, D_END), 2, D_END, None, "wins_per_dau")
+    assert d is None and "arms are in line" in note and "level wins/DAU by arm" in note
+
+    for r in cuts["arm_play"]:                          # now the variant wins 60% more on the read day
+        if r["platform"] == 2 and r["day"] == D_END and r["arm"] == "variant_a":
+            r["wins"] = int(r["wins"] * 1.6)
+    d, _ = _experiment_change(Ctx(cuts, build(cuts, cfg), cfg, D_END), 2, D_END, None, "wins_per_dau")
+    assert d.cause == "experiment_change" and d.confidence == "likely" and "arms differ by" in d.headline
+    assert any("level wins/DAU by arm" in e for e in d.evidence)
+
+    d, _ = _experiment_change(Ctx(cuts, s, cfg, D_END), 2, D_END, None, "rolling_d1")   # no per-arm cut
+    assert d.confidence == "possible" and "cannot be compared" in d.headline and "arms differ" not in d.headline

@@ -66,6 +66,17 @@ A finding needs |z| ≥ 3 **and** the metric's minimum relative move, in the wro
 finding carries DoD (vs the day before), WoW (vs the same weekday last week), the trend (this
 week's mean vs last week's) and `persist_days` — consecutive days beyond 2σ the same way.
 
+**Broken days stay out of every baseline** (added 2026-11-27). A day is *dead* for a platform when a
+config-class block reason runs at ≥ 0.5 per DAU **and** ≥ 3× its own median over the 35-day window
+(`series.dead_days`; a chronic reason such as `ManagerNotFound`, at 2–3/DAU every day, never
+qualifies). On such days the game refused its own ads, so ad volume, revenue and even play (players
+who see no interstitials win more levels) are not normal. The detector's baseline, its σ and every
+comparison window in the diagnosis step over dead days and reach one day further back for each one;
+persistence never chains a healthy-day move onto the broken days before it; the footer names the
+days skipped. Why: on Nov 26, the day after the win-ad fix, the old baseline still held Nov 23–25,
+so iOS level wins/DAU read −12 % (an alarm) when against healthy days it was −9 % (not one), and the
+iOS revenue gap left by the UA cut (−20 %) was hidden by the broken days' low revenue.
+
 **$ impact** (`severity.py`) = what yesterday would have earned had the metric stayed at its baseline,
 at yesterday's volume: a volume move at yesterday's price, a price move at yesterday's volume, DAU at
 baseline ARPDAU, blocks at 65 % show-through × IT eCPM.
@@ -103,7 +114,10 @@ with their numbers, a second fit is kept as *also*:
 5. **mix** — Kitagawa split of the per-DAU rate by age band: mix ≥ 60 % of the move and D0 share
    moved ≥ 3 pts → audience, not behaviour (Adjust installs quoted).
 6. **experiment change** — a key whose assigned players/day jumped ≥ 1.8× (or appeared) in the last
-   3 days, with arms ≥ 25 % apart on this metric.
+   3 days. Its arms are then compared on the metric that moved (IT / RV impressions per DAU, level
+   wins per DAU): ≥ 25 % apart → the likely cause, with the per-arm line as evidence; in line → cleared
+   and listed under *Ruled out* with the numbers; a metric with no per-arm cut (retention, audience,
+   banner, eCPM) → "possible", said as "its arms cannot be compared on this metric", never as a gap.
 7. **build rollout** — a build that gained ≥ 10 pts to ≥ 15 % of DAU and runs ≤ 0.75× the others.
 8. **banner only** — interstitials rose (banners pause under full-screen ads).
 
@@ -360,8 +374,9 @@ every run; the next backend deploy will carry the monitor files harmlessly. **Ro
 `MONITOR_*_ENABLED` keys to false and recreate the worker; nothing else in the app changes.
 
 ## 7. Known limits
-- The baseline is the median of the 7 days before; during a multi-day incident it drifts towards the
-  broken level, so the $ figure shrinks day by day (the first day's figure is the honest one).
+- Broken days are recognised only from config-class block reasons. Other incidents (a dead placement
+  with no block reason, a pipeline gap) still sit in the 7-day baseline and pull it towards the
+  broken level for a week, so their $ figure shrinks day by day (the first day's figure is the honest one).
 - Two heavy scans per run (`t_act` from Jul 1 for install days, `t_ad` for the 35-day window); ~3.5 min
   on Redshift. A local DuckDB store pulling only the last 4 days would cut this if the daily cost matters.
 - The intraday check reads hard breaks only (§5b); a break that is real but gentle — one placement at

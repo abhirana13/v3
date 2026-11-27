@@ -101,6 +101,26 @@ def _join_items(items: list[str], limit: int) -> str:
     return text
 
 
+def _day_span(days: list[int]) -> str:
+    """[20780, 20781, 20782] -> 'Nov 23–25'; separate runs are listed: 'Nov 20, Nov 23–24'."""
+    days = sorted(days)
+    runs, start, prev = [], days[0], days[0]
+    for d in days[1:] + [None]:
+        if d is not None and d == prev + 1:
+            prev = d
+            continue
+        a, b = day_date(start), day_date(prev)
+        if start == prev:
+            runs.append(a.strftime("%b %d"))
+        elif a.month == b.month:
+            runs.append(f"{a.strftime('%b %d')}–{b.day:02d}")
+        else:
+            runs.append(f"{a.strftime('%b %d')}–{b.strftime('%b %d')}")
+        if d is not None:
+            start = prev = d
+    return ", ".join(runs)
+
+
 def _section(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text[:2900]}}
 
@@ -167,6 +187,9 @@ def build_message(cfg: GameCfg, day: date, scored: list[Scored], recoveries: lis
         ctx_bits.append("DAU " + " / ".join(f"{cfg.platform_name(p)} {v:,.0f}" for p, v in footer["dau"].items()))
     if footer.get("frontier"):
         ctx_bits.append(f"data complete to {footer['frontier']}")
+    for p, days in (footer.get("baseline_skips") or {}).items():
+        if days:
+            ctx_bits.append(f"baselines skip {cfg.platform_name(p)} {_day_span(days)} (game refusing its own ads)")
     if run_label:
         ctx_bits.append(run_label)
     if cfg.dashboard_url:
